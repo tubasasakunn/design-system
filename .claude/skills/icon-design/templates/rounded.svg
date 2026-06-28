@@ -1,0 +1,12 @@
+<!--
+  rounded スタイルの出発点テンプレート（DESIGN.md §4.2 準拠）。
+  - viewBox 0 0 24 24、ライブエリアは中央 ~20x20（各辺 2 余白を残す）
+  - stroke="currentColor" / fill="none"（線画・着色は消費側）
+  - stroke-width=2 / linecap=round / linejoin=round
+  描いたら下の <path> を実際のグリフに差し替える。固定色は埋めない。
+  配置: sources/icons/rounded/<category>/<name>.svg
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M5 12h14" />
+</svg>

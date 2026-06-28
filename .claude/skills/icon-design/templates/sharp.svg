@@ -1,0 +1,14 @@
+<!--
+  sharp スタイルの出発点テンプレート（DESIGN.md §4.3 準拠）。
+  - viewBox 0 0 24 24、ライブエリアは中央 ~20x20
+  - stroke="currentColor" / fill="none"
+  - stroke-width=2（rounded と視覚的重さを揃える）
+  - linecap=butt / linejoin=miter（端も角も角ばる）
+  注意: 鋭角では miter-limit 超過で角が自動 bevel になる。鋭角を使うなら
+        stroke-miterlimit を明示するか、角度を寝かせて検証する（REFERENCE.md §2.2）。
+  配置: sources/icons/sharp/<category>/<name>.svg
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+     stroke="currentColor" stroke-width="2" stroke-linecap="butt" stroke-linejoin="miter">
+  <path d="M5 12h14" />
+</svg>

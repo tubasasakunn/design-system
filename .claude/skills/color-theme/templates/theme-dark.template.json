@@ -1,0 +1,31 @@
+{
+  "$description": "新テーマの dark 外観テンプレート。sources/themes/<theme>/dark.json にコピーして値を埋める。",
+  "$note": "キー集合は light.json と完全一致。単純反転せず別最適化する: 純黒を避け(#121212系)、彩度をやや下げ、アクセントは明るめに。",
+  "$appearance": "dark",
+  "color": {
+    "bg": {
+      "primary": "#161616",
+      "secondary": "#1f1f1f",
+      "elevated": "#262626"
+    },
+    "fg": {
+      "primary": "#f4f4f4",
+      "secondary": "#c0c0c0",
+      "muted": "#8a8a8a"
+    },
+    "accent": {
+      "default": "#5b9cf6",
+      "hover": "#7cb0f8",
+      "fg": "#06234d"
+    },
+    "border": {
+      "default": "#2e2e2e",
+      "strong": "#444444"
+    },
+    "status": {
+      "success": "#34d399",
+      "warning": "#fbbf24",
+      "error": "#f87171"
+    }
+  }
+}

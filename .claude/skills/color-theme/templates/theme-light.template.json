@@ -1,0 +1,32 @@
+{
+  "$description": "新テーマの light 外観テンプレート。sources/themes/<theme>/light.json にコピーして値を埋める。",
+  "$note": "全キーは dark.json と完全一致させる(キー欠落はWeb/Swiftを壊す)。:root既定にするなら下の $default を true に。",
+  "$appearance": "light",
+  "$default": false,
+  "color": {
+    "bg": {
+      "primary": "#ffffff",
+      "secondary": "#f4f4f5",
+      "elevated": "#ffffff"
+    },
+    "fg": {
+      "primary": "#1a1a1a",
+      "secondary": "#5a5a5a",
+      "muted": "#6f6f6f"
+    },
+    "accent": {
+      "default": "#2563eb",
+      "hover": "#1d4ed8",
+      "fg": "#ffffff"
+    },
+    "border": {
+      "default": "#e5e5e5",
+      "strong": "#cccccc"
+    },
+    "status": {
+      "success": "#2fae6e",
+      "warning": "#f0a830",
+      "error": "#ef5b5b"
+    }
+  }
+}
