@@ -1,0 +1,5 @@
+node_modules/
+
+# 生成物。sources/ から `npm run build` でいつでも再生成できる。
+# 各プロジェクトへ配布したい場合はこのコメントを外して dist/ をコミットする。
+dist/

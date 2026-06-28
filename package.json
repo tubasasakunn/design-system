@@ -1,0 +1,13 @@
+{
+  "name": "design-system",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "アイコンセットと複数カラーテーマを source of truth で管理し、Web(Vite)/Swift 向けに生成するデザインシステム",
+  "scripts": {
+    "build": "node build/build-web.mjs && node build/build-swift.mjs && node build/build-preview.mjs",
+    "build:web": "node build/build-web.mjs",
+    "build:swift": "node build/build-swift.mjs",
+    "build:preview": "node build/build-preview.mjs"
+  }
+}

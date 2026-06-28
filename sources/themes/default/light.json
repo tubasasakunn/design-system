@@ -1,0 +1,10 @@
+{
+  "$appearance": "light",
+  "color": {
+    "bg": { "primary": "#ffffff", "secondary": "#f4f4f5", "elevated": "#ffffff" },
+    "fg": { "primary": "#18181b", "secondary": "#52525b", "muted": "#a1a1aa" },
+    "accent": { "default": "#3b82f6", "hover": "#2563eb", "fg": "#ffffff" },
+    "border": { "default": "#e4e4e7", "strong": "#d4d4d8" },
+    "status": { "success": "#22c55e", "warning": "#f59e0b", "error": "#ef4444" }
+  }
+}
