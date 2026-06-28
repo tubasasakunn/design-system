@@ -1,0 +1,29 @@
+{
+  "$appearance": "dark",
+  "color": {
+    "bg": {
+      "primary": "#0e1c1f",
+      "secondary": "#142629",
+      "elevated": "#1a3034"
+    },
+    "fg": {
+      "primary": "#e3f1f0",
+      "secondary": "#a6c2c1",
+      "muted": "#6f8d8c"
+    },
+    "accent": {
+      "default": "#3ec5b8",
+      "hover": "#58d2c6",
+      "fg": "#052622"
+    },
+    "border": {
+      "default": "#20383b",
+      "strong": "#325054"
+    },
+    "status": {
+      "success": "#34d399",
+      "warning": "#fbbf24",
+      "error": "#f87171"
+    }
+  }
+}
