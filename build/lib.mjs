@@ -17,8 +17,9 @@ export function flatten(obj, prefix = "", out = {}) {
 // "color.bg.primary" -> "color-bg-primary"
 export const kebab = (s) => s.replace(/\./g, "-");
 
-// "arrow-left" -> "arrowLeft" / "ocean" -> "Ocean"
-export const camel = (s) => s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+// "arrow-left" -> "arrowLeft" / "ocean" -> "Ocean" / "volume-2" -> "volume2"
+// ハイフン区切りを全て除去（数字後続も含む）。Swift の enum case 識別子にハイフンは使えないため。
+export const camel = (s) => s.replace(/-+([a-z0-9])/g, (_, c) => c.toUpperCase());
 export const pascal = (s) => { const c = camel(s); return c.charAt(0).toUpperCase() + c.slice(1); };
 
 // #rgb / #rrggbb / #rrggbbaa -> { r, g, b (0-255), a (0-1) }
