@@ -34,13 +34,15 @@ export function parseHex(hex) {
   };
 }
 
+const isDir = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+const subdirs = (root) => (isDir(root) ? readdirSync(root).filter((e) => isDir(join(root, e))) : []);
+
 // sources/themes/<theme>/<appearance>.json を
 // { theme: { appearance: { "color.bg.primary": "#fff", ... } } } で読み込む。
 export function loadThemes(root) {
   const themes = {};
-  for (const theme of readdirSync(root)) {
+  for (const theme of subdirs(root)) {
     const dir = join(root, theme);
-    if (!statSync(dir).isDirectory()) continue;
     themes[theme] = {};
     for (const file of readdirSync(dir)) {
       if (!file.endsWith(".json")) continue;
@@ -51,13 +53,27 @@ export function loadThemes(root) {
   return themes;
 }
 
-// テーマ群を CSS 変数定義に変換する。default/light は :root の既定値にもなる。
+// :root の既定値にするテーマ名を返す。いずれかの外観 JSON に "$default": true を持つテーマ。
+// 見つからなければ null（その場合どのテーマも :root を持たない）。
+export function findDefaultTheme(root) {
+  for (const theme of subdirs(root)) {
+    const dir = join(root, theme);
+    for (const file of readdirSync(dir)) {
+      if (!file.endsWith(".json")) continue;
+      const json = JSON.parse(readFileSync(join(dir, file), "utf8"));
+      if (json.$default === true) return theme;
+    }
+  }
+  return null;
+}
+
+// テーマ群を CSS 変数定義に変換する。defaultTheme の light は :root の既定値にもなる。
 // build-web と build-preview で同じ出力を使うため共通化している。
-export function themesToCss(themes) {
+export function themesToCss(themes, defaultTheme = null) {
   let css = "";
   for (const [theme, appearances] of Object.entries(themes)) {
     for (const [appearance, tokens] of Object.entries(appearances)) {
-      const isDefault = theme === "default" && appearance === "light";
+      const isDefault = theme === defaultTheme && appearance === "light";
       const scoped = `[data-theme="${theme}"][data-appearance="${appearance}"]`;
       const selector = isDefault ? `:root,\n${scoped}` : scoped;
       const decls = Object.entries(tokens).map(([k, v]) => `  --${kebab(k)}: ${v};`).join("\n");
@@ -75,16 +91,30 @@ export function allTokenKeys(themes) {
   return [...keys].sort();
 }
 
-// sources/icons 配下の .svg を再帰的に集める。直近の親フォルダ名を category とする。
+// sources/icons/<style>/<category>/<name>.svg を集める。
+// 第1階層 = style（丸み系 rounded / カクカク系 sharp …）、第2階層 = category、ファイル名 = name。
+// name はスタイル内で一意。スタイルをまたいで同名 SVG（別スタイルの同じ意味のアイコン）を持てる。
 export function loadIcons(root) {
   const icons = [];
-  const walk = (dir, category) => {
-    for (const entry of readdirSync(dir)) {
-      const full = join(dir, entry);
-      if (statSync(full).isDirectory()) walk(full, entry);
-      else if (entry.endsWith(".svg")) icons.push({ name: entry.replace(/\.svg$/, ""), category, path: full });
+  for (const style of subdirs(root)) {
+    for (const category of subdirs(join(root, style))) {
+      const dir = join(root, style, category);
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith(".svg")) continue;
+        icons.push({ style, category, name: file.replace(/\.svg$/, ""), path: join(dir, file) });
+      }
     }
-  };
-  walk(root, "");
-  return icons.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return icons.sort((a, b) => a.style.localeCompare(b.style) || a.name.localeCompare(b.name));
+}
+
+// 利用可能なアイコンスタイル一覧（ソート済み）。
+export function iconStyles(root) {
+  return subdirs(root).sort();
+}
+
+// 既定のアイコンスタイル。慣例として "rounded"。無ければ先頭のスタイル、何も無ければ null。
+export function defaultIconStyle(root) {
+  const styles = iconStyles(root);
+  return styles.includes("rounded") ? "rounded" : styles[0] ?? null;
 }

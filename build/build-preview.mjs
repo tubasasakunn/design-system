@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadThemes, loadIcons, themesToCss, allTokenKeys, kebab } from "./lib.mjs";
+import { loadThemes, loadIcons, themesToCss, allTokenKeys, kebab, findDefaultTheme } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "dist/preview");
@@ -12,6 +12,7 @@ rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 
 const themes = loadThemes(join(ROOT, "sources/themes"));
+const defaultTheme = findDefaultTheme(join(ROOT, "sources/themes"));
 const icons = loadIcons(join(ROOT, "sources/icons"));
 const tokenKeys = allTokenKeys(themes);
 
@@ -32,10 +33,19 @@ const swatches = tokenKeys
   .join("\n");
 
 // アイコンはインライン SVG。currentColor なので前景色に追従する。
-const iconCells = icons
-  .map((icon) => {
-    const svg = readFileSync(icon.path, "utf8").trim();
-    return `<figure class="icon"><div class="glyph">${svg}</div><figcaption>${icon.name}<small>${icon.category}</small></figcaption></figure>`;
+// スタイル(丸み系/カクカク系…)ごとにセクション分けして見比べられるようにする。
+const styles = [...new Set(icons.map((i) => i.style))].sort();
+const iconSection = styles
+  .map((style) => {
+    const cells = icons
+      .filter((i) => i.style === style)
+      .map((icon) => {
+        const svg = readFileSync(icon.path, "utf8").trim();
+        return `<figure class="icon"><div class="glyph">${svg}</div><figcaption>${icon.name}<small>${icon.category}</small></figcaption></figure>`;
+      })
+      .join("\n");
+    const count = icons.filter((i) => i.style === style).length;
+    return `<h3 class="style-h">${style} <span>(${count})</span></h3><div class="icons">${cells}</div>`;
   })
   .join("\n");
 
@@ -51,7 +61,7 @@ const html = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>design-system カタログ</title>
 <style>
-${themesToCss(themes)}
+${themesToCss(themes, defaultTheme)}
 * { box-sizing: border-box; }
 body {
   margin: 0; font-family: system-ui, sans-serif;
@@ -74,6 +84,8 @@ select, button {
 button.active { background: var(--color-accent-default); color: var(--color-accent-fg); border-color: transparent; }
 main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
 h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--color-fg-muted); margin: 2rem 0 1rem; }
+.style-h { font-size: .8rem; margin: 1.2rem 0 .6rem; color: var(--color-fg-secondary); }
+.style-h span { color: var(--color-fg-muted); font-weight: normal; }
 .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .5rem; }
 .swatch { display: flex; align-items: center; gap: .6rem; padding: .5rem; border: 1px solid var(--color-border-default); border-radius: 10px; background: var(--color-bg-secondary); }
 .chip { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--color-border-strong); flex: none; }
@@ -94,8 +106,8 @@ figcaption small { color: var(--color-fg-muted); }
 <main>
   <h2>カラートークン（${tokenKeys.length}）</h2>
   <div class="swatches">${swatches}</div>
-  <h2>アイコン（${icons.length}）</h2>
-  <div class="icons">${iconCells}</div>
+  <h2>アイコン（${icons.length} / ${styles.length} スタイル）</h2>
+  ${iconSection}
 </main>
 <script>
   const root = document.documentElement;

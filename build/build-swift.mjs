@@ -1,7 +1,7 @@
 // Swift(iOS/macOS)向け生成: sources/ -> dist/swift/
 //   Colors/<Theme>.xcassets : テーマ別カラーカタログ。light/dark を 1 つの colorset に統合。
-//   Icons.xcassets          : SVG を imageset 化 (ベクター保持 + テンプレート描画)。
-//   DesignSystem.swift      : Image/Color へアクセスする型付き API (DSIcon, DSTheme)。
+//   Icons.xcassets          : SVG を imageset 化 (ベクター保持 + テンプレート描画)。style で名前空間化。
+//   DesignSystem.swift      : Image/Color へアクセスする型付き API (DSIcon.<Style>, DSTheme)。
 import { mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,12 +35,17 @@ for (const [theme, appearances] of Object.entries(themes)) {
   }
 }
 
-// --- Icons -> Icons.xcassets ---
+// --- Icons -> Icons.xcassets（style を名前空間フォルダにする）---
 const icons = loadIcons(join(ROOT, "sources/icons"));
 const iconCatalog = join(OUT, "Icons.xcassets");
 writeJSON(join(iconCatalog, "Contents.json"), { info: INFO });
+const styles = [...new Set(icons.map((i) => i.style))].sort();
+for (const style of styles) {
+  // provides-namespace により asset 名が "<style>/<name>" になる。
+  writeJSON(join(iconCatalog, style, "Contents.json"), { info: INFO, properties: { "provides-namespace": true } });
+}
 for (const icon of icons) {
-  const setDir = join(iconCatalog, `${icon.name}.imageset`);
+  const setDir = join(iconCatalog, icon.style, `${icon.name}.imageset`);
   mkdirSync(setDir, { recursive: true });
   copyFileSync(icon.path, join(setDir, `${icon.name}.svg`));
   writeJSON(join(setDir, "Contents.json"), {
@@ -51,17 +56,27 @@ for (const icon of icons) {
 }
 
 // --- 型付き Swift API ---
-const names = [...new Set(icons.map((i) => i.name))].sort();
+// スタイルごとにネストした enum を作る。例: DSIcon.Rounded.arrowLeft.image
 // case 名は予約語(default など)と衝突しうるのでバッククォートで囲む。
-const iconCases = names.map((n) => `    case \`${camel(n)}\` = "${n}"`).join("\n");
+const styleEnums = styles
+  .map((style) => {
+    const names = [...new Set(icons.filter((i) => i.style === style).map((i) => i.name))].sort();
+    const cases = names.map((n) => `        case \`${camel(n)}\` = "${n}"`).join("\n");
+    return `    /// ${style} スタイルのアイコン。asset 名は "${style}/<name>"。
+    public enum ${pascal(style)}: String, CaseIterable {
+${cases}
+        public var image: Image { Image("${style}/\\(rawValue)", bundle: .module) }
+    }`;
+  })
+  .join("\n\n");
 const themeCases = Object.keys(themes).map((t) => `    case \`${camel(t)}\` = "${pascal(t)}"`).join("\n");
 const swift = `// AUTO-GENERATED — 直接編集しないでください
 import SwiftUI
 
-/// アイコン。Icons.xcassets はテンプレート描画なので foregroundStyle で着色できる。
-public enum DSIcon: String, CaseIterable {
-${iconCases}
-    public var image: Image { Image(rawValue, bundle: .module) }
+/// アイコン。スタイル(丸み系/カクカク系…)ごとに型を分けている。
+/// Icons.xcassets はテンプレート描画なので foregroundStyle で着色できる。
+public enum DSIcon {
+${styleEnums}
 }
 
 /// カラーテーマ。各 case が dist/swift/Colors/<Theme>.xcassets に対応する。
@@ -71,4 +86,4 @@ ${themeCases}
 `;
 writeFileSync(join(OUT, "DesignSystem.swift"), swift);
 
-console.log(`✓ swift: ${Object.keys(themes).length} themes, ${icons.length} icons → dist/swift`);
+console.log(`✓ swift: ${Object.keys(themes).length} themes, ${icons.length} icons (${styles.length} styles) → dist/swift`);
