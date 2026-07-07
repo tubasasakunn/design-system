@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="揺れる紐">
+<meta name="pattern-desc" content="Verlet 積分の紐が複数ぶら下がり、風でそよぐ。掴んで振り回せる。張力で色がわずかに変わる。">
+<title>揺れる紐</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>揺れる紐</h1>
+  <p>風でそよぐ紐を、掴んで振り回せます。ぴんと張ると色がわずかに温かく変わります。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  let C = {};
+  function readColors() {
+    C = {
+      bg:    token("--color-bg-primary", "#faf7f1"),
+      rope:  token("--color-accent-default", "#5bbcb1"),
+      taut:  token("--color-status-warning", "#f0a830"),
+      deep:  token("--color-accent-fg", "#07312d"),
+      knob:  token("--color-bg-elevated", "#fffdf9"),
+      ink:   token("--color-fg-primary", "#2c2a26"),
+      border:token("--color-border-strong", "#ddd5c6"),
+    };
+  }
+  const parse = (h) => { h = h.replace("#",""); if (h.length===3) h=h.split("").map(c=>c+c).join(""); const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+  const mixRGB = (a, b, t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+  const rgb = (c) => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+
+  let W = 0, H = 0;
+  const GRAV = 1400;
+  const SEG_LEN = 16;
+  const ITER = 14;       // 拘束の反復回数（剛性）
+  const ropes = [];
+
+  function buildRopes() {
+    ropes.length = 0;
+    const n = Math.max(4, Math.round(W / 150));
+    const gap = W / (n + 1);
+    for (let r = 0; r < n; r++) {
+      const ax = gap * (r + 1);
+      const len = H * (0.42 + (r % 3) * 0.12);
+      const count = Math.max(6, Math.round(len / SEG_LEN));
+      const pts = [];
+      for (let i = 0; i < count; i++) {
+        const y = 0 + i * SEG_LEN;
+        pts.push({ x: ax, y, px: ax, py: y, pinned: i === 0 });
+      }
+      ropes.push({ pts, hue: (r * 0.13) % 1, strain: 0 });
+    }
+  }
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    buildRopes();
+  }
+
+  // 風: 複数の正弦波の重ね合わせ（擬似ノイズ）で位置・時間依存の力
+  let tsec = 0;
+  function windAt(x, y) {
+    if (rm.matches) return 0;
+    return (
+      Math.sin(x * 0.006 + tsec * 1.1) * 0.6 +
+      Math.sin(y * 0.010 - tsec * 1.7) * 0.4 +
+      Math.sin(x * 0.02 + y * 0.01 + tsec * 2.3) * 0.3
+    ) * 520 + Math.sin(tsec * 0.5) * 180;   // ゆっくりした基調の風
+  }
+
+  // ---- Verlet 積分 + 距離拘束 ----
+  function simulate(dt) {
+    const damp = 0.992;
+    for (const rope of ropes) {
+      for (const p of rope.pts) {
+        if (p.pinned) { p.px = p.x; p.py = p.y; continue; }
+        if (grab.active && grab.rope === rope && grab.idx === rope.pts.indexOf(p)) continue;
+        const w = windAt(p.x, p.y);
+        const vx = (p.x - p.px) * damp;
+        const vy = (p.y - p.py) * damp;
+        p.px = p.x; p.py = p.y;
+        p.x += vx + w * dt * dt;
+        p.y += vy + GRAV * dt * dt;
+      }
+      // 掴んでいる点はポインタへ固定
+      if (grab.active && grab.rope === rope) {
+        const p = rope.pts[grab.idx];
+        p.x = grab.x; p.y = grab.y;
+      }
+    }
+    // 距離拘束を反復（各セグメントを rest 長へ）+ 張力計測
+    for (let k = 0; k < ITER; k++) {
+      for (const rope of ropes) {
+        let maxStrain = 0;
+        const pts = rope.pts;
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = pts[i], b = pts[i + 1];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let d = Math.hypot(dx, dy) || 1e-4;
+          const diff = (d - SEG_LEN) / d;
+          if (k === 0) maxStrain = Math.max(maxStrain, Math.abs(d - SEG_LEN) / SEG_LEN);
+          const ox = dx * 0.5 * diff, oy = dy * 0.5 * diff;
+          if (!a.pinned && !(grab.active && grab.rope === rope && grab.idx === i)) { a.x += ox; a.y += oy; }
+          if (!b.pinned && !(grab.active && grab.rope === rope && grab.idx === i + 1)) { b.x -= ox; b.y -= oy; }
+        }
+        if (k === 0) rope.strain += (maxStrain - rope.strain) * 0.25;
+      }
+    }
+  }
+
+  // ---- ドラッグ: 最寄りの点を掴む ----
+  const grab = { active: false, rope: null, idx: -1, x: 0, y: 0, id: -1 };
+  canvas.addEventListener("pointerdown", (e) => {
+    const x = e.clientX, y = e.clientY;
+    let best = null, bestD = 44 * 44;
+    for (const rope of ropes) {
+      for (let i = 1; i < rope.pts.length; i++) {
+        const p = rope.pts[i];
+        const dd = (p.x - x) ** 2 + (p.y - y) ** 2;
+        if (dd < bestD) { bestD = dd; best = { rope, idx: i }; }
+      }
+    }
+    if (best) {
+      grab.active = true; grab.rope = best.rope; grab.idx = best.idx;
+      grab.x = x; grab.y = y; grab.id = e.pointerId;
+      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = "grabbing";
+    }
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (grab.active) { grab.x = e.clientX; grab.y = e.clientY; }
+  });
+  const up = () => { grab.active = false; grab.rope = null; grab.idx = -1; canvas.style.cursor = "grab"; };
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    // 上端の梁（紐の取り付け）
+    ctx.fillStyle = C.border;
+    ctx.fillRect(0, 0, W, 6);
+
+    for (const rope of ropes) {
+      const pts = rope.pts;
+      // 張力で色を温かい方へ（accent → warning）
+      const t = Math.min(rope.strain * 10, 1);
+      const colRGB = mixRGB(parse(C.rope), parse(C.taut), t * 0.7);
+      const col = rgb(colRGB);
+      const dark = rgb(mixRGB(parse(C.deep), parse(C.taut), t * 0.5));
+      const hiCol = rgb(mixRGB(colRGB, [255, 255, 255], 0.28));
+
+      // 影
+      ctx.save();
+      ctx.strokeStyle = rgb(mixRGB(parse(C.bg), parse(C.ink), 0.08));
+      ctx.lineWidth = 8; ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x + 3, pts[0].y + 5);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x + 3, pts[i].y + 5);
+      ctx.stroke();
+      ctx.restore();
+
+      // 紐本体（滑らかに）
+      ctx.lineJoin = "round"; ctx.lineCap = "round";
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length - 1; i++) {
+        const mx = (pts[i].x + pts[i + 1].x) / 2;
+        const my = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      }
+      const lastp = pts[pts.length - 1];
+      ctx.lineTo(lastp.x, lastp.y);
+      ctx.stroke();
+
+      // 芯のハイライト
+      ctx.strokeStyle = hiCol;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length - 1; i++) {
+        const mx = (pts[i].x + pts[i + 1].x) / 2;
+        const my = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      }
+      ctx.lineTo(lastp.x, lastp.y);
+      ctx.stroke();
+
+      // 取り付け点
+      ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = dark; ctx.fill();
+
+      // 先端の玉（掴む的）
+      ctx.beginPath(); ctx.arc(lastp.x, lastp.y, 9, 0, Math.PI * 2);
+      const g = ctx.createRadialGradient(lastp.x - 3, lastp.y - 4, 1, lastp.x, lastp.y, 12);
+      g.addColorStop(0, C.knob); g.addColorStop(1, col);
+      ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = dark; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+  }
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    tsec += dt;
+    acc += dt;
+    const STEP = 1 / 120; let n = 0;
+    while (acc >= STEP && n < 6) { simulate(STEP); acc -= STEP; n++; }
+    if (acc >= STEP) acc = 0;
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  readColors();
+  resize();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

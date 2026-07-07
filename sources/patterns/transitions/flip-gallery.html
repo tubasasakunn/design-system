@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="モーフ遷移ギャラリー">
+<meta name="pattern-desc" content="サムネイルをクリックするとその位置から詳細ビューへ FLIP で拡大モーフし、閉じると元の場所へ戻る共有要素遷移。">
+<title>モーフ遷移ギャラリー</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .stage { height: 100dvh; display: flex; flex-direction: column; }
+  header { padding: 64px 32px 8px; text-align: center; }
+  header h1 { font-size: 1.05rem; font-weight: 600; letter-spacing: .06em; }
+  header p { margin-top: 6px; font-size: .78rem; color: var(--color-fg-muted); }
+  .grid {
+    flex: 1; min-height: 0;
+    display: grid; gap: 18px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-auto-rows: 150px;
+    align-content: start;
+    padding: 22px clamp(20px, 5vw, 64px) 40px;
+    overflow: auto;
+  }
+  .card {
+    position: relative; border-radius: 20px; overflow: hidden; cursor: pointer;
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 4px 14px rgba(40,35,25,.06);
+    transition: box-shadow .3s ease, transform .3s ease;
+    will-change: transform;
+  }
+  .card:hover { box-shadow: 0 10px 26px rgba(40,35,25,.12); transform: translateY(-3px); }
+  .card .swatch { position: absolute; inset: 0; }
+  .card .label {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 14px;
+    font-size: .82rem; font-weight: 600; color: var(--ink);
+    background: linear-gradient(to top, color-mix(in srgb, var(--tint) 62%, transparent), transparent);
+  }
+  .scrim {
+    position: fixed; inset: 0; z-index: 40; opacity: 0; pointer-events: none;
+    background: color-mix(in srgb, var(--color-bg-primary) 70%, transparent);
+    backdrop-filter: blur(6px);
+    transition: opacity .42s cubic-bezier(.22,1,.36,1);
+  }
+  .scrim.on { opacity: 1; pointer-events: auto; }
+  .detail {
+    position: fixed; z-index: 50; border-radius: 24px; overflow: hidden;
+    transform-origin: top left; will-change: transform;
+    box-shadow: 0 24px 60px rgba(40,35,25,.22);
+    display: none;
+  }
+  .detail .swatch { position: absolute; inset: 0; }
+  .detail .body {
+    position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end;
+    padding: clamp(22px, 4vw, 40px);
+    background: linear-gradient(to top, color-mix(in srgb, var(--tint) 78%, transparent) 8%, transparent 62%);
+  }
+  .detail .body h2 { font-size: clamp(1.4rem, 3.6vw, 2.2rem); color: var(--ink); letter-spacing: .01em; }
+  .detail .body p {
+    margin-top: 12px; max-width: 46ch; line-height: 1.75; font-size: .92rem;
+    color: color-mix(in srgb, var(--ink) 82%, transparent);
+  }
+  .detail .fade { opacity: 0; transition: opacity .3s ease; }
+  .detail .close {
+    position: absolute; top: 16px; right: 16px; z-index: 2;
+    width: 40px; height: 40px; border-radius: 999px; cursor: pointer;
+    border: 1px solid color-mix(in srgb, var(--ink) 30%, transparent);
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    color: var(--ink); font-size: 1.1rem; line-height: 1;
+    display: grid; place-items: center;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card, .scrim, .detail, .detail .fade { transition-duration: .01ms !important; }
+    .card:hover { transform: none; }
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <header>
+    <h1>モーフ遷移ギャラリー</h1>
+    <p>カードに触れると、その位置から詳細へ滑らかに広がります。</p>
+  </header>
+  <div class="grid" id="grid"></div>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="detail" id="detail">
+  <div class="swatch"></div>
+  <button class="close fade" id="close" aria-label="閉じる">✕</button>
+  <div class="body fade">
+    <h2></h2>
+    <p></p>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const grid = document.getElementById("grid");
+  const scrim = document.getElementById("scrim");
+  const detail = document.getElementById("detail");
+  const dSwatch = detail.querySelector(".swatch");
+  const dTitle = detail.querySelector("h2");
+  const dText = detail.querySelector("p");
+
+  // パステル多色（淡色の上に濃色インク）
+  const palette = [
+    { tint: "#5bbcb1", ink: "#07312d", name: "みなも" },
+    { tint: "#f0a8bd", ink: "#5a1c30", name: "はなびら" },
+    { tint: "#f1d189", ink: "#4d3b0e", name: "こはく" },
+    { tint: "#bcb2e8", ink: "#2c2450", name: "あさぼらけ" },
+    { tint: "#f3a890", ink: "#5a2417", name: "さんご" },
+    { tint: "#9fc8ea", ink: "#173553", name: "とおぞら" },
+    { tint: "#a9dcc0", ink: "#173d2c", name: "わかば" },
+    { tint: "#f0a830", ink: "#4a3208", name: "ゆうひ" },
+  ];
+  const copy = "静けさのなかで少しずつ表情を変える色。手を触れると奥ゆきが立ちあがり、離すとまた元の場所へ静かに戻っていきます。好みの一枚を、余白のなかで選ぶための小さな展示。";
+
+  const cards = [];
+  for (let i = 0; i < 12; i++) {
+    const p = palette[i % palette.length];
+    const el = document.createElement("div");
+    el.className = "card";
+    el.style.setProperty("--tint", p.tint);
+    el.style.setProperty("--ink", p.ink);
+    const grad = `radial-gradient(120% 120% at 30% 20%, color-mix(in srgb, ${p.tint} 42%, var(--color-bg-elevated)), color-mix(in srgb, ${p.tint} 88%, var(--color-fg-primary)))`;
+    el.innerHTML = `<div class="swatch" style="background:${grad}"></div><div class="label">${p.name} ${String(i + 1).padStart(2, "0")}</div>`;
+    el._data = { ...p, grad, idx: i };
+    el.addEventListener("click", () => open(el));
+    grid.appendChild(el);
+    cards.push(el);
+  }
+
+  let active = null;      // 現在開いているカード
+  let animating = false;
+
+  function detailBox() {
+    // 詳細ビューの目標矩形（画面中央・アスペクトを程よく）
+    const vw = innerWidth, vh = innerHeight;
+    const w = Math.min(vw - 40, 720);
+    const h = Math.min(vh - 120, Math.round(w * 0.66));
+    return { left: (vw - w) / 2, top: (vh - h) / 2, width: w, height: Math.max(220, h) };
+  }
+
+  function open(card) {
+    if (animating || active) return;
+    animating = true;
+    active = card;
+    const d = card._data;
+    detail.style.setProperty("--tint", d.tint);
+    detail.style.setProperty("--ink", d.ink);
+    dSwatch.style.background = d.grad;
+    dTitle.textContent = `${d.name} ${String(d.idx + 1).padStart(2, "0")}`;
+    dText.textContent = copy;
+
+    const first = card.getBoundingClientRect();
+    const box = detailBox();
+    // Last 状態に配置
+    detail.style.display = "block";
+    detail.style.left = box.left + "px";
+    detail.style.top = box.top + "px";
+    detail.style.width = box.width + "px";
+    detail.style.height = box.height + "px";
+
+    // Invert: Last→First の逆変換
+    const sx = first.width / box.width;
+    const sy = first.height / box.height;
+    const tx = first.left - box.left;
+    const ty = first.top - box.top;
+    detail.style.transition = "none";
+    detail.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+    card.style.visibility = "hidden";
+
+    // Play
+    detail.getBoundingClientRect(); // reflow
+    const dur = rm.matches ? 0 : 460;
+    detail.style.transition = `transform ${dur}ms cubic-bezier(.22,1,.36,1)`;
+    requestAnimationFrame(() => {
+      detail.style.transform = "translate(0,0) scale(1,1)";
+      scrim.classList.add("on");
+      detail.querySelectorAll(".fade").forEach((f) => (f.style.opacity = "1"));
+    });
+    const done = () => { animating = false; detail.removeEventListener("transitionend", done); };
+    detail.addEventListener("transitionend", done);
+    if (rm.matches) done();
+  }
+
+  function close() {
+    if (animating || !active) return;
+    animating = true;
+    const card = active;
+    const first = card.getBoundingClientRect(); // 現在のカード位置（リサイズ追従）
+    const box = detail.getBoundingClientRect();
+    const sx = first.width / box.width;
+    const sy = first.height / box.height;
+    const tx = first.left - box.left;
+    const ty = first.top - box.top;
+    const dur = rm.matches ? 0 : 420;
+    detail.style.transition = `transform ${dur}ms cubic-bezier(.5,0,.2,1)`;
+    detail.querySelectorAll(".fade").forEach((f) => (f.style.opacity = "0"));
+    scrim.classList.remove("on");
+    requestAnimationFrame(() => {
+      detail.style.transform = `translate(${tx}px, ${ty}px) scale(${sx}, ${sy})`;
+    });
+    const done = () => {
+      detail.removeEventListener("transitionend", done);
+      detail.style.display = "none";
+      detail.style.transition = "none";
+      detail.style.transform = "";
+      card.style.visibility = "";
+      active = null;
+      animating = false;
+    };
+    detail.addEventListener("transitionend", done);
+    if (rm.matches) done();
+  }
+
+  document.getElementById("close").addEventListener("click", close);
+  scrim.addEventListener("click", close);
+  addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+})();
+</script>
+</body>
+</html>

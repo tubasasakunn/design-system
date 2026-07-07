@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="タイルの川">
+<meta name="pattern-desc" content="円弧のトゥルーシェタイルが繋がって流れ模様を作り、タイルが周期的に回転して張り替わり模様が生き続ける。">
+<title>タイルの川</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 320px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>タイルの川</h1>
+  <p>円弧のタイルが繋がり、流れの筋が現れます。タイルは時折くるりと回って張り替わります。触れた辺りは張り替えが早まります。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let bg, flow, flow2, faint;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    const acc = hex(token("--color-accent-default", "#5bbcb1"));
+    const deep = hex(token("--color-accent-fg", "#07312d"));
+    const elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    flow = mix(acc, deep, 0.15);
+    flow2 = hex(token("--color-fg-muted", "#a79f91"));
+    faint = mix(bg, hex(token("--color-border-default", "#ece6db")), 0.7);
+  }
+
+  let W = 0, H = 0, cell = 64, cols = 0, rows = 0;
+  let tiles = []; // {o:0/1, flip:0..1, next:seconds}
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round";
+    cell = Math.max(52, Math.min(96, Math.round(Math.min(W, H) / 9)));
+    cols = Math.ceil(W / cell) + 1;
+    rows = Math.ceil(H / cell) + 1;
+    tiles = new Array(cols * rows);
+    for (let i = 0; i < tiles.length; i++) {
+      tiles[i] = { o: (Math.random() < 0.5) ? 0 : 1, flip: 0, next: 2 + Math.random() * 8 };
+    }
+  }
+
+  // 一つの円弧タイルを描く。orientation 0: 左上と右下の角を結ぶ2弧 / 1: その反対。
+  // 回転 rot(ラジアン) を与えると、タイル中心まわりに content を回してから描く（張り替えの演出）。
+  function drawTile(cx, cy, o, rot, phase) {
+    const h = cell / 2;
+    ctx.save();
+    ctx.translate(cx + h, cy + h);
+    if (rot) ctx.rotate(rot);
+    ctx.translate(-h, -h);
+    // 背景タイル(生成りの微かな面)
+    // 円弧2本。半径 = h、それぞれの角を中心にした四分円。
+    // orientation 0 の弧は 角(0,0) と 角(cell,cell) を中心
+    const centers = o === 0
+      ? [[0, 0], [cell, cell]]
+      : [[cell, 0], [0, cell]];
+    for (let k = 0; k < 2; k++) {
+      const [ax, ay] = centers[k];
+      // 流れの下地
+      ctx.beginPath();
+      ctx.arc(ax, ay, h, 0, Math.PI * 2);
+      ctx.lineWidth = cell * 0.32;
+      ctx.strokeStyle = rgba(mix(bg, faint, 1), 0.9);
+      ctx.setLineDash([]);
+      // クリップして四分円だけ見せる
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, cell, cell);
+      ctx.clip();
+      ctx.beginPath();
+      ctx.arc(ax, ay, h, 0, Math.PI * 2);
+      ctx.lineWidth = cell * 0.30;
+      ctx.strokeStyle = rgba(faint, 0.85);
+      ctx.stroke();
+      // 流れる筋（破線を時間で流す）
+      ctx.beginPath();
+      ctx.arc(ax, ay, h, 0, Math.PI * 2);
+      ctx.lineWidth = cell * 0.11;
+      const col = k === 0 ? flow : mix(flow, flow2, 0.5);
+      ctx.strokeStyle = rgba(col, 0.9);
+      const dash = cell * 0.34;
+      ctx.setLineDash([dash * 0.55, dash * 0.7]);
+      // 弧長 = 2πh。k と位相で流れ方向に差をつける
+      ctx.lineDashOffset = phase * (k === 0 ? -1 : 1);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  let t = 0;
+  let pointer = { x: -1e9, y: -1e9, active: false };
+  canvas.addEventListener("pointerdown", (e) => { pointer.active = true; pointer.x = e.clientX; pointer.y = e.clientY; });
+  canvas.addEventListener("pointermove", (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
+  const off = () => { pointer.active = false; };
+  canvas.addEventListener("pointerup", off);
+  canvas.addEventListener("pointerleave", off);
+
+  function update(dt) {
+    t += dt;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const tile = tiles[i];
+        if (tile.flip > 0) {
+          tile.flip += dt / 0.7; // 0.7 秒で 90 度回転
+          if (tile.flip >= 1) {
+            tile.flip = 0;
+            tile.o ^= 1;       // 90 度回すと orientation が入れ替わる
+            tile.next = 3 + Math.random() * 9;
+          }
+        } else if (!rm.matches) {
+          // 近くをポインタが触れていると張り替えが早まる
+          const cx = c * cell + cell / 2, cy = r * cell + cell / 2;
+          let boost = 1;
+          if (pointer.active) {
+            const d = Math.hypot(cx - pointer.x, cy - pointer.y);
+            if (d < cell * 2.5) boost = 6;
+          }
+          tile.next -= dt * boost;
+          if (tile.next <= 0) tile.flip = 0.0001;
+        }
+      }
+    }
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = rgba(bg, 1);
+    ctx.fillRect(0, 0, W, H);
+    const phase = (t * cell * 0.5) % 100000;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const tile = tiles[r * cols + c];
+        const rot = tile.flip > 0 ? tile.flip * (Math.PI / 2) : 0;
+        drawTile(c * cell, r * cell, tile.o, rot, phase);
+      }
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

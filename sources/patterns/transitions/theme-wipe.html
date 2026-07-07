@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="テーマワイプ">
+<meta name="pattern-desc" content="ボタンを押すとクリック地点から円形ワイプが広がり、旧画面を覆いながら light と dark を切り替える演出。">
+<title>テーマワイプ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .screen {
+    height: 100dvh; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 26px; padding: 72px 24px 40px;
+    background: var(--color-bg-primary); color: var(--color-fg-primary);
+  }
+  .panel {
+    width: min(460px, 92vw); border-radius: 24px; padding: 28px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 14px 40px rgba(40,35,25,.10);
+  }
+  .panel .eyebrow { font-size: .72rem; letter-spacing: .28em; text-transform: uppercase; color: var(--color-fg-muted); }
+  .panel h1 { margin-top: 10px; font-size: 1.5rem; font-weight: 650; letter-spacing: .01em; }
+  .panel p { margin-top: 12px; font-size: .9rem; line-height: 1.8; color: var(--color-fg-secondary); }
+  .swatches { display: flex; gap: 10px; margin-top: 20px; }
+  .swatches i { flex: 1; height: 34px; border-radius: 12px; border: 1px solid var(--color-border-default); }
+  .s-bg { background: var(--color-bg-secondary); }
+  .s-ac { background: var(--color-accent-default); }
+  .s-ok { background: var(--color-status-success); }
+  .s-wn { background: var(--color-status-warning); }
+  .s-er { background: var(--color-status-error); }
+  .row { display: flex; gap: 12px; margin-top: 22px; align-items: center; }
+  .btn {
+    font: inherit; font-size: .9rem; cursor: pointer; border-radius: 999px;
+    padding: .7rem 1.3rem; border: 1px solid transparent;
+  }
+  .btn.primary { background: var(--color-accent-default); color: var(--color-accent-fg); }
+  .btn.primary:hover { background: var(--color-accent-hover); }
+  .btn.ghost { background: transparent; color: var(--color-fg-secondary); border-color: var(--color-border-strong); }
+  .caption { font-size: .78rem; color: var(--color-fg-muted); text-align: center; max-width: 340px; }
+  /* ワイプ用オーバーレイ（新しい外観をスコープ内で持つ） */
+  #wipe {
+    position: fixed; inset: 0; z-index: 900; display: none;
+    will-change: clip-path;
+  }
+  #wipe.on { display: block; }
+</style>
+</head>
+<body>
+<div class="screen" id="app">
+  <div class="panel">
+    <div class="eyebrow">appearance</div>
+    <h1>光と陰、どちらでも</h1>
+    <p>同じトークンが、外観に合わせて静かに色を変えます。切り替えの瞬間だけ、ふれた場所から新しい光が広がります。</p>
+    <div class="swatches">
+      <i class="s-bg"></i><i class="s-ac"></i><i class="s-ok"></i><i class="s-wn"></i><i class="s-er"></i>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="toggle">外観を切り替える</button>
+      <button class="btn ghost">そのまま</button>
+    </div>
+  </div>
+  <p class="caption">ボタンのふれた点から円が広がります。何度でも押せます。</p>
+</div>
+<div id="wipe"><div id="wipeInner"></div></div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const root = document.documentElement;
+  const app = document.getElementById("app");
+  const wipe = document.getElementById("wipe");
+  const wipeInner = document.getElementById("wipeInner");
+  let animating = false;
+
+  function currentTheme() {
+    return root.dataset.theme && root.dataset.theme.length ? root.dataset.theme : "cream";
+  }
+  function farthestRadius(x, y) {
+    const w = innerWidth, h = innerHeight;
+    return Math.max(Math.hypot(x, y), Math.hypot(w - x, y), Math.hypot(x, h - y), Math.hypot(w - x, h - y));
+  }
+
+  function run(x, y) {
+    if (animating) return;
+    const target = root.dataset.appearance === "dark" ? "light" : "dark";
+
+    if (rm.matches) { root.dataset.appearance = target; return; }
+    animating = true;
+
+    // 旧画面は #app のまま残し、新外観の複製を上から円でワイプ表示する
+    const clone = app.cloneNode(true);
+    // id 重複を避ける
+    clone.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
+    clone.removeAttribute("id");
+    wipeInner.replaceChildren(clone);
+    // オーバーレイのサブツリーだけに目標外観のトークンをスコープする
+    wipe.dataset.theme = currentTheme();
+    wipe.dataset.appearance = target;
+
+    const R = farthestRadius(x, y);
+    wipe.classList.add("on");
+    wipe.style.transition = "none";
+    wipe.style.clipPath = `circle(0px at ${x}px ${y}px)`;
+    wipe.getBoundingClientRect(); // reflow
+    wipe.style.transition = "clip-path 640ms cubic-bezier(.65,0,.2,1)";
+    requestAnimationFrame(() => {
+      wipe.style.clipPath = `circle(${R}px at ${x}px ${y}px)`;
+    });
+
+    const done = () => {
+      wipe.removeEventListener("transitionend", done);
+      // ここで初めて本体の外観を確定（複製と一致するので継ぎ目なし）
+      root.dataset.appearance = target;
+      try { localStorage.setItem("ds-appearance", target); } catch {}
+      wipe.classList.remove("on");
+      wipe.style.transition = "none";
+      wipe.style.clipPath = "";
+      wipeInner.replaceChildren();
+      animating = false;
+    };
+    wipe.addEventListener("transitionend", done);
+  }
+
+  const toggle = document.getElementById("toggle");
+  toggle.addEventListener("click", (e) => {
+    // ボタン中心を起点に（ポインタ座標があればそれを優先）
+    let x = e.clientX, y = e.clientY;
+    if (!x && !y) { const r = toggle.getBoundingClientRect(); x = r.left + r.width / 2; y = r.top + r.height / 2; }
+    run(x, y);
+  });
+})();
+</script>
+</body>
+</html>

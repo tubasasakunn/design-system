@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="折りたたむ紙">
+<meta name="pattern-desc" content="CSS 3D の三つ折りリーフレット。バネ物理で順に折り畳まれ、折り目の陰影が角度に追従する。ドラッグで開き加減を操作。">
+<title>折りたたむ紙</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: radial-gradient(120% 100% at 50% 0%, var(--color-bg-primary), var(--color-bg-secondary));
+    color: var(--color-fg-primary);
+    display: grid; place-items: center;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  .scene { perspective: 1400px; cursor: grab; }
+  .scene.dragging { cursor: grabbing; }
+  .leaflet {
+    --pw: min(190px, 26vw); --ph: calc(var(--pw) * 1.45);
+    position: relative; width: var(--pw); height: var(--ph);
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+  .panel {
+    position: absolute; inset: 0;
+    transform-style: preserve-3d;
+  }
+  .hinge {
+    position: absolute; top: 0; width: var(--pw); height: var(--ph);
+    transform-style: preserve-3d; will-change: transform;
+  }
+  #hingeR { left: 100%; transform-origin: left center; }
+  #hingeL { right: 100%; transform-origin: right center; }
+  .face {
+    position: absolute; inset: 0; backface-visibility: hidden;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    padding: 1.1rem; overflow: hidden;
+    display: flex; flex-direction: column; gap: .6rem;
+  }
+  .face.back { transform: rotateY(180deg); background: color-mix(in srgb, var(--color-bg-elevated) 92%, var(--color-fg-muted)); }
+  .panel.center .face { border-radius: 0; }
+  #hingeL .face { border-radius: 18px 0 0 18px; }
+  #hingeL .face.back { border-radius: 0 18px 18px 0; }
+  #hingeR .face { border-radius: 0 18px 18px 0; }
+  #hingeR .face.back { border-radius: 18px 0 0 18px; }
+  .shade { position: absolute; inset: 0; pointer-events: none; opacity: 0; border-radius: inherit; }
+  .shade.toL { background: linear-gradient(to left,  color-mix(in srgb, var(--color-fg-primary) 26%, transparent), transparent 70%); }
+  .shade.toR { background: linear-gradient(to right, color-mix(in srgb, var(--color-fg-primary) 26%, transparent), transparent 70%); }
+
+  /* ---- 紙面のデザイン ---- */
+  .kicker { font-size: .6rem; letter-spacing: .32em; color: var(--color-fg-muted); }
+  .t1 { font-size: 1.05rem; font-weight: 650; letter-spacing: .12em; line-height: 1.5; }
+  .body-copy { font-size: .62rem; line-height: 1.9; color: var(--color-fg-secondary); letter-spacing: .06em; }
+  .rule { height: 1px; background: var(--color-border-default); }
+  .dots { display: flex; gap: 8px; margin-top: auto; }
+  .dots i { width: 14px; height: 14px; border-radius: 50%; }
+  .swatches { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: auto; }
+  .swatches b {
+    height: clamp(22px, calc(var(--ph) * .11), 34px); border-radius: 10px;
+    display: flex; align-items: flex-end; padding: 5px;
+    font-size: .5rem; font-weight: 500; letter-spacing: .08em; color: #07312d;
+  }
+  .cover { align-items: center; justify-content: center; text-align: center; gap: .9rem; }
+  .cover .mark {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: var(--color-accent-default);
+    box-shadow: inset -6px -8px 0 color-mix(in srgb, var(--color-accent-hover) 80%, transparent);
+  }
+  .shapes { display: flex; flex-wrap: wrap; gap: 10px; margin-top: .2rem; }
+  .shapes span { width: 30px; height: 30px; border: 2px solid var(--color-accent-default); }
+  .shapes .c { border-radius: 50%; }
+  .shapes .r { border-radius: 9px; }
+  .shapes .p { border-radius: 50% 50% 50% 4px; background: color-mix(in srgb, var(--color-accent-default) 24%, transparent); border-color: transparent; }
+
+  .shadow {
+    position: absolute; left: 50%; top: 50%;
+    width: calc(var(--pw) * 3.4); height: 40px;
+    transform: translate(-50%, calc(var(--ph) * .62));
+    background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--color-fg-primary) 22%, transparent), transparent 70%);
+    filter: blur(6px); pointer-events: none;
+  }
+  .bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; }
+  #toggle {
+    padding: .55rem 1.5rem; border-radius: 999px; font-size: .82rem; letter-spacing: .14em; font-family: inherit;
+    color: var(--color-accent-fg); background: var(--color-accent-default); border: none; cursor: pointer;
+    transition: transform .18s cubic-bezier(.34,1.56,.64,1), background .18s;
+  }
+  #toggle:hover { background: var(--color-accent-hover); transform: translateY(-2px); }
+  .hint {
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default); backdrop-filter: blur(8px); white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="scene" id="scene">
+  <div class="leaflet" id="leaflet">
+    <div class="shadow" id="shadow"></div>
+    <div class="panel center">
+      <div class="face front">
+        <span class="kicker">02 ── いろ</span>
+        <div class="t1">生成りの上に<br>淡いティール</div>
+        <div class="rule"></div>
+        <p class="body-copy">背景は生成り。差し色はひとつだけ。純黒も純白も使わない。</p>
+        <div class="swatches">
+          <b style="background:#5bbcb1">accent</b>
+          <b style="background:#a9dcc0">mint</b>
+          <b style="background:#f1d189">yellow</b>
+          <b style="background:#f0a8bd">pink</b>
+        </div>
+      </div>
+      <div class="face back"></div>
+      <div class="shade toL" id="shCL"></div>
+      <div class="shade toR" id="shCR"></div>
+    </div>
+    <div class="hinge" id="hingeR">
+      <div class="panel">
+        <div class="face front">
+          <span class="kicker">03 ── かたち</span>
+          <div class="t1">角丸は大きく<br>罫線は控えめに</div>
+          <div class="rule"></div>
+          <p class="body-copy">20px を基調とした角丸。輪郭は細く、面で語る。ぽよんとした弾性が、触れたことへの返事になる。</p>
+          <div class="shapes"><span class="c"></span><span class="r"></span><span class="p"></span></div>
+          <div class="dots"><i style="background:#5bbcb1"></i><i style="background:#f0a8bd"></i><i style="background:#f1d189"></i><i style="background:#bcb2e8"></i></div>
+        </div>
+        <div class="face back"></div>
+        <div class="shade toR" id="shR"></div>
+      </div>
+    </div>
+    <div class="hinge" id="hingeL">
+      <div class="panel">
+        <div class="face front">
+          <span class="kicker">01 ── よはく</span>
+          <div class="t1">余白がまず<br>語りはじめる</div>
+          <div class="rule"></div>
+          <p class="body-copy">詰めない。急がない。要素と要素のあいだに呼吸を残すと、視線は自然に主役へ向かう。</p>
+          <div class="dots"><i style="background:#9fc8ea"></i><i style="background:#a9dcc0"></i><i style="background:#f3a890"></i></div>
+        </div>
+        <div class="face back cover">
+          <div class="mark"></div>
+          <div>
+            <div class="kicker" style="margin-bottom:.5rem">DESIGN LEAFLET</div>
+            <div class="t1">しずかな設計</div>
+          </div>
+          <p class="body-copy">三つ折り ── ひらいて読む</p>
+        </div>
+        <div class="shade toL" id="shL"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="bar">
+  <span class="hint">ドラッグで開き加減</span>
+  <button id="toggle" type="button">とじる</button>
+</div>
+<script>
+(() => {
+"use strict";
+const scene = document.getElementById("scene");
+const leaflet = document.getElementById("leaflet");
+const hingeL = document.getElementById("hingeL");
+const hingeR = document.getElementById("hingeR");
+const shadow = document.getElementById("shadow");
+const toggle = document.getElementById("toggle");
+const sh = {
+  L: document.getElementById("shL"), R: document.getElementById("shR"),
+  CL: document.getElementById("shCL"), CR: document.getElementById("shCR"),
+};
+const reduceMq = matchMedia("(prefers-reduced-motion: reduce)");
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+// fold: 0 = 全開, 1 = 全閉。右 → 左 の順に畳む
+const st = { fold: 0, v: 0, target: 0 };
+const sway = { x: 0, y: 0, tx: 0, ty: 0 };
+let dragging = false, dragStartX = 0, dragStartFold = 0;
+
+scene.addEventListener("pointerdown", (e) => {
+  dragging = true; dragStartX = e.clientX; dragStartFold = st.fold;
+  scene.classList.add("dragging"); scene.setPointerCapture(e.pointerId);
+});
+scene.addEventListener("pointermove", (e) => {
+  if (dragging) {
+    // 左へドラッグ＝畳む / 右へドラッグ＝ひらく
+    st.target = clamp01(dragStartFold - (e.clientX - dragStartX) / 340);
+  } else {
+    sway.tx = (e.clientX / innerWidth - 0.5) * 14;
+    sway.ty = (e.clientY / innerHeight - 0.5) * -10;
+  }
+});
+const endDrag = () => {
+  if (!dragging) return;
+  dragging = false; scene.classList.remove("dragging");
+  st.target = st.target > 0.5 ? 1 : 0;            // 近い側へスナップ
+  toggle.textContent = st.target > 0.5 ? "ひらく" : "とじる";
+};
+scene.addEventListener("pointerup", endDrag);
+scene.addEventListener("pointercancel", endDrag);
+toggle.addEventListener("click", () => {
+  st.target = st.target > 0.5 ? 0 : 1;
+  toggle.textContent = st.target > 0.5 ? "ひらく" : "とじる";
+});
+
+const apply = () => {
+  const f = st.fold;
+  const pR = clamp01(f * 2);          // 右パネルの折り進行
+  const pL = clamp01(f * 2 - 1);      // 左パネルの折り進行
+  const thR = pR * 178, thL = pL * 178;
+  const radR = thR * Math.PI / 180, radL = thL * Math.PI / 180;
+
+  hingeR.style.transform = `translateZ(${pR * 1.5}px) rotateY(${-thR}deg)`;
+  hingeL.style.transform = `translateZ(${pL * 5}px) rotateY(${thL}deg)`;
+
+  // 折り目の陰影: 折りかけ（90°付近）で最も濃い
+  sh.R.style.opacity = (Math.sin(radR) * 0.55).toFixed(3);
+  sh.L.style.opacity = (Math.sin(radL) * 0.55).toFixed(3);
+  sh.CR.style.opacity = (Math.sin(radR) * 0.4).toFixed(3);
+  sh.CL.style.opacity = (Math.sin(radL) * 0.4).toFixed(3);
+
+  // 全体の姿勢: 畳むほど正面に寄り、少し縮む
+  const open = 1 - f;
+  const tilt = 8 * open;
+  leaflet.style.transform =
+    `rotateX(${tilt + sway.y * open}deg) rotateY(${sway.x * open}deg) scale(${0.94 + open * 0.06})`;
+  shadow.style.width = `calc(var(--pw) * ${(1 + open * 2.4).toFixed(3)})`;
+  shadow.style.opacity = (0.5 + open * 0.3).toFixed(3);
+};
+
+let last = performance.now();
+const frame = (now) => {
+  const dt = Math.min(0.04, (now - last) / 1000); last = now;
+  if (reduceMq.matches) {
+    st.fold = st.target; st.v = 0; sway.x = sway.y = 0;
+  } else if (dragging) {
+    st.fold += (st.target - st.fold) * Math.min(1, dt * 22); // ドラッグ中は追従
+    st.v = 0;
+  } else {
+    const k = 64, d = 10;                                    // ばね（少しだけ弾む）
+    st.v += (k * (st.target - st.fold) - d * st.v) * dt;
+    st.fold += st.v * dt;
+    if (st.fold < -0.06) { st.fold = -0.06; st.v *= -0.4; }
+    if (st.fold > 1.06) { st.fold = 1.06; st.v *= -0.4; }
+  }
+  sway.x += (sway.tx - sway.x) * Math.min(1, dt * 5);
+  sway.y += (sway.ty - sway.y) * Math.min(1, dt * 5);
+  apply();
+  requestAnimationFrame(frame);
+};
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

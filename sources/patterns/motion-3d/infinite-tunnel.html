@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="無限トンネル">
+<meta name="pattern-desc" content="奥から流れてくるリング群を抜けて飛ぶ無限トンネル。ポインタで進路を曲げ、押さえている間は加速する。">
+<title>無限トンネル</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); color: var(--color-fg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">ポインタで進路をまげる ─ 押さえている間は加速</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const reduceMq = matchMedia("(prefers-reduced-motion: reduce)");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+// アクセント → 空色 → ラベンダーの3点グラデ
+const grad3 = (t) => t < 0.5 ? mix(C.acc, C.sky, t * 2) : mix(C.sky, C.lav, t * 2 - 1);
+const C = {};
+const refreshColors = () => {
+  C.bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.acc = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accH = hexRgb(token("--color-accent-hover", "#46a89d"));
+  const dark = (0.299 * C.bg[0] + 0.587 * C.bg[1] + 0.114 * C.bg[2]) / 255 < 0.45;
+  C.sky = hexRgb("#9fc8ea"); C.lav = hexRgb("#bcb2e8");
+  if (dark) { C.sky = mix(C.sky, [255, 255, 255], 0.1); C.lav = mix(C.lav, [255, 255, 255], 0.1); }
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス ----
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+resize();
+addEventListener("resize", resize);
+
+// ---- トンネル ----
+const FAR = 24, NEAR = 0.45, RINGS = 30, TUBE_R = 1.0;
+const rings = [];
+for (let i = 0; i < RINGS; i++) {
+  rings.push({ z: NEAR + (i / RINGS) * (FAR - NEAR), rot: Math.random() * 6.28, seed: Math.random() * 6.28 });
+}
+// リング間を流れる塵（スピード感）
+const dust = [];
+for (let i = 0; i < 60; i++) {
+  dust.push({ z: NEAR + Math.random() * (FAR - NEAR), a: Math.random() * 6.28, r: 0.35 + Math.random() * 0.75 });
+}
+
+// ---- 操縦 ----
+const steer = { x: 0, y: 0, tx: 0, ty: 0 };   // -1..1
+let holding = false;
+const onPoint = (e) => {
+  steer.tx = (e.clientX / W - 0.5) * 2;
+  steer.ty = (e.clientY / H - 0.5) * 2;
+};
+canvas.addEventListener("pointermove", onPoint);
+canvas.addEventListener("pointerdown", (e) => { holding = true; onPoint(e); canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointerup", () => { holding = false; });
+canvas.addEventListener("pointercancel", () => { holding = false; });
+
+// 深度 z のリング中心（トンネルの曲がり）: 操縦 + 自律的なうねり
+let time = 0;
+const centerAt = (z) => {
+  const t = z / FAR;
+  const curve = t * t;                                     // 手前はまっすぐ、奥ほど曲がる
+  const sx = steer.x * curve * W * 0.55 + Math.sin(time * 0.4 + z * 0.35) * curve * W * 0.10;
+  const sy = steer.y * curve * H * 0.45 + Math.cos(time * 0.3 + z * 0.28) * curve * H * 0.08;
+  return { x: W / 2 + sx, y: H / 2 + sy };
+};
+
+let speed = 3.2, shake = 0;
+let last = performance.now();
+const frame = (now) => {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const reduce = reduceMq.matches;
+  time += dt;
+
+  // 速度: ホールドで加速（イージング）
+  const targetSpeed = reduce ? 0 : (holding ? 13 : 3.2);
+  speed += (targetSpeed - speed) * Math.min(1, dt * 2.2);
+  shake += ((speed > 8 ? 1 : 0) - shake) * Math.min(1, dt * 3);
+  steer.x += (steer.tx - steer.x) * Math.min(1, dt * 4);
+  steer.y += (steer.ty - steer.y) * Math.min(1, dt * 4);
+
+  // 前進: リングと塵を手前へ
+  for (const r of rings) {
+    r.z -= speed * dt;
+    r.rot += dt * 0.25;
+    if (r.z < NEAR) { r.z += FAR - NEAR; r.seed = Math.random() * 6.28; }
+  }
+  for (const d of dust) {
+    d.z -= speed * dt * 1.15;
+    if (d.z < NEAR) { d.z += FAR - NEAR; d.a = Math.random() * 6.28; }
+  }
+
+  ctx.clearRect(0, 0, W, H);
+  const FOCAL = Math.min(W, H) * (0.62 - shake * 0.06);   // 加速時は画角を広く
+  const jx = shake ? (Math.random() - 0.5) * 2.4 * shake : 0;
+  const jy = shake ? (Math.random() - 0.5) * 2.4 * shake : 0;
+
+  // 最奥の吸い込み（フォグの芯）
+  const deep = centerAt(FAR * 0.92);
+  const g = ctx.createRadialGradient(deep.x, deep.y, 0, deep.x, deep.y, Math.min(W, H) * 0.5);
+  g.addColorStop(0, rgba(mix(C.acc, C.bg, 0.55), 0.5));
+  g.addColorStop(1, rgba(C.bg, 0));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // 塵（奥 → 手前）: 短い流線で速度を可視化
+  const sorted = [...rings].sort((a, b) => b.z - a.z);
+  for (const d of dust) {
+    const c1 = centerAt(d.z);
+    const s1 = FOCAL / d.z;
+    const x1 = c1.x + Math.cos(d.a) * TUBE_R * d.r * s1 + jx;
+    const y1 = c1.y + Math.sin(d.a) * TUBE_R * d.r * s1 + jy;
+    const z2 = Math.min(FAR, d.z + 0.12 + speed * 0.035);
+    const c2 = centerAt(z2);
+    const s2 = FOCAL / z2;
+    const fogT = 1 - Math.min(1, (d.z - NEAR) / (FAR * 0.85));
+    ctx.strokeStyle = rgba(mix(C.bg, grad3(((d.a / 6.28) + d.z * 0.04) % 1), fogT), 0.55 * fogT);
+    ctx.lineWidth = Math.max(0.6, 1.6 * fogT);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(c2.x + Math.cos(d.a) * TUBE_R * d.r * s2 + jx, c2.y + Math.sin(d.a) * TUBE_R * d.r * s2 + jy);
+    ctx.stroke();
+  }
+
+  // リング（奥 → 手前）
+  for (const r of sorted) {
+    const c = centerAt(r.z);
+    const s = FOCAL / r.z;
+    const R = TUBE_R * s;
+    const fogT = 1 - Math.min(1, (r.z - NEAR) / (FAR * 0.85));  // 1=手前
+    const nearFade = Math.min(1, (r.z - NEAR) / 0.9);           // 通過直前に薄れて抜ける
+    const col = mix(C.bg, grad3((r.seed / 6.28 + r.z * 0.05) % 1), 0.25 + fogT * 0.75);
+    const alpha = (0.25 + 0.7 * fogT) * nearFade;
+    if (alpha < 0.01) continue;
+
+    // 本体リング（呼吸するように僅かに楕円化）
+    const sq = 1 + Math.sin(time * 1.4 + r.seed) * 0.03;
+    ctx.strokeStyle = rgba(col, alpha);
+    ctx.lineWidth = Math.max(0.7, 3.2 * fogT * fogT * (1 + shake * 0.4));
+    ctx.beginPath();
+    ctx.ellipse(c.x + jx, c.y + jy, R, R * sq, r.rot * 0.2, 0, 6.283);
+    ctx.stroke();
+
+    // リング上のビーズ（回転が流れを見せる）
+    const beads = 6;
+    for (let b = 0; b < beads; b++) {
+      const a = r.rot + r.seed + (b / beads) * 6.283;
+      ctx.fillStyle = rgba(mix(col, C.ink, 0.12), alpha);
+      ctx.beginPath();
+      ctx.arc(c.x + Math.cos(a) * R + jx, c.y + Math.sin(a) * R * sq + jy, Math.max(0.8, 2.6 * fogT), 0, 6.283);
+      ctx.fill();
+    }
+  }
+
+  // 中央のわずかなビネット（視線誘導）
+  const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.55, W / 2, H / 2, Math.max(W, H) * 0.8);
+  v.addColorStop(0, rgba(C.bg, 0));
+  v.addColorStop(1, rgba(mix(C.bg, C.ink, 0.06), 0.55));
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, W, H);
+
+  requestAnimationFrame(frame);
+};
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

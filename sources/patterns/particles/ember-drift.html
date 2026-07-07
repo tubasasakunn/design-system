@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>火の粉</title>
+<meta name="pattern-title" content="火の粉">
+<meta name="pattern-desc" content="焚き火から立ちのぼる火の粉。揺らぎながら上昇し、冷めて橙から灰へ変わり消える。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; display: block; touch-action: none; cursor: crosshair; }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .04em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hint">動かすと焚き火の位置が移る / 押すと火勢が増す</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d");
+  const root = document.documentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+  let COL = {};
+  function readColors() {
+    COL = {
+      bg:     token("--color-bg-primary", "#faf7f1"),
+      soft:   token("--color-fg-secondary", "#6c655b"),
+      muted:  token("--color-fg-muted", "#a79f91"),
+      warm:   token("--color-status-warning", "#f0a830"),
+      hot:    token("--color-status-error", "#ef5b5b"),
+      accent: token("--color-accent-default", "#5bbcb1"),
+    };
+  }
+  readColors();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    fire.x = W / 2; fire.y = H * 0.82;
+  }
+
+  const fire = { x: 0, y: 0, intensity: 1 };
+  let W0 = false;
+  function pointer(e) { fire.x = e.clientX; fire.y = e.clientY; }
+  canvas.addEventListener("pointermove", pointer);
+  canvas.addEventListener("pointerdown", (e) => { canvas.setPointerCapture?.(e.pointerId); W0 = true; pointer(e); });
+  const rel = () => { W0 = false; };
+  canvas.addEventListener("pointerup", rel);
+  canvas.addEventListener("pointercancel", rel);
+
+  // 色補間 hex→hex
+  function hex(c) {
+    c = c.replace("#", "");
+    if (c.length === 3) c = c.split("").map(x => x + x).join("");
+    return [parseInt(c.slice(0,2),16), parseInt(c.slice(2,4),16), parseInt(c.slice(4,6),16)];
+  }
+  function mix(a, b, t) {
+    return `rgb(${Math.round(a[0]+(b[0]-a[0])*t)},${Math.round(a[1]+(b[1]-a[1])*t)},${Math.round(a[2]+(b[2]-a[2])*t)})`;
+  }
+
+  const embers = [];
+  const MAX = reduce.matches ? 90 : 340;
+
+  function emit() {
+    const spread = 26 * fire.intensity;
+    const ang = Math.random() * Math.PI * 2;
+    const rr = Math.random() * spread;
+    embers.push({
+      x: fire.x + Math.cos(ang) * rr,
+      y: fire.y + Math.sin(ang) * rr * 0.4,
+      vx: (Math.random() - 0.5) * 20,
+      vy: -(40 + Math.random() * 70) * fire.intensity,
+      life: 0,
+      max: 1.6 + Math.random() * 2.4,
+      seed: Math.random() * 1000,
+      size: 0.8 + Math.random() * 2.0,
+      heat: 0.85 + Math.random() * 0.15,
+    });
+  }
+
+  // 熾火の明滅用位相
+  let t = 0;
+  let last = performance.now();
+
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+    t += dt;
+
+    fire.intensity += ((W0 ? 2.1 : 1) - fire.intensity) * (1 - Math.exp(-4 * dt));
+
+    // 生成り背景に薄い残像で温かみを残す
+    ctx.globalAlpha = reduce.matches ? 1 : 0.32;
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+
+    // 熾火（火床）の明滅
+    const flick = 0.6 + 0.4 * Math.sin(t * 7.3) * Math.sin(t * 3.1);
+    const bedR = 60 * fire.intensity;
+    const g = ctx.createRadialGradient(fire.x, fire.y, 2, fire.x, fire.y, bedR);
+    const hotC = hex(COL.hot), warmC = hex(COL.warm);
+    g.addColorStop(0, `rgba(${warmC[0]},${warmC[1]},${warmC[2]},${0.28 * (0.7 + flick * 0.5)})`);
+    g.addColorStop(0.5, `rgba(${hotC[0]},${hotC[1]},${hotC[2]},${0.14 * flick})`);
+    g.addColorStop(1, `rgba(${hotC[0]},${hotC[1]},${hotC[2]},0)`);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(fire.x, fire.y, bedR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 放出
+    const rate = reduce.matches ? 2 : Math.round(9 * fire.intensity);
+    for (let i = 0; i < rate; i++) if (embers.length < MAX) emit();
+
+    const hotRGB = hex(COL.hot), warmRGB = hex(COL.warm), ashRGB = hex(COL.muted);
+
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = embers.length - 1; i >= 0; i--) {
+      const p = embers[i];
+      p.life += dt;
+      const u = p.life / p.max;
+      if (u >= 1) { embers.splice(i, 1); continue; }
+
+      // 揺らぎ: 高さに応じた横風 + 個体の位相（sin ノイズ）
+      const sway = Math.sin(t * 1.6 + p.seed) * 26 + Math.sin(t * 3.7 + p.seed * 1.7) * 10;
+      p.vx += (sway - p.vx) * (1 - Math.exp(-2 * dt));
+      // 冷めるにつれ浮力が落ち、重力がわずかに勝る
+      const buoy = -60 * (1 - u) * fire.intensity;
+      p.vy += (buoy * 0.6 + 22 * u) * dt;
+      p.vy *= Math.exp(-0.4 * dt);
+
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+
+      // 温度: 序盤は熱く（赤→橙）、後半で冷えて灰へ
+      let col, glow;
+      if (u < 0.5) {
+        col = mix(hotRGB, warmRGB, u / 0.5);
+        glow = 1;
+      } else {
+        col = mix(warmRGB, ashRGB, (u - 0.5) / 0.5);
+        glow = 1 - (u - 0.5) / 0.5;
+      }
+      const alpha = (1 - u) * (0.5 + glow * 0.5) * p.heat;
+      const r = p.size * (1 + glow * 0.8);
+
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("resize", resize);
+  resize();
+  ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+  requestAnimationFrame((t2) => { last = t2; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

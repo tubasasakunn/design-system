@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="水面の屈折">
+<meta name="pattern-desc" content="水面下のタイル模様が、進行する波のディスプレイスメントで屈折して歪む。ポインタで波を起こせる。">
+<title>水面の屈折</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">なでる / クリックで波紋 ─ 水底のタイルが屈折して揺らぐ</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const simCanvas = document.createElement("canvas");
+const simCtx = simCanvas.getContext("2d");
+const texCanvas = document.createElement("canvas");
+const texCtx = texCanvas.getContext("2d");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const mix = (a, b, t) => [
+  Math.round(a[0] + (b[0] - a[0]) * t),
+  Math.round(a[1] + (b[1] - a[1]) * t),
+  Math.round(a[2] + (b[2] - a[2]) * t),
+];
+const C = {};
+const refreshColors = () => {
+  C.tile   = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.tileB  = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.grout  = hexRgb(token("--color-border-strong", "#ddd5c6"));
+  C.acc    = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accD   = hexRgb(token("--color-accent-hover", "#46a89d"));
+  if (simW) buildTexture();
+};
+
+// ---- 波動シミュレーション格子 ----
+const CELL = 4;                     // 1 セル = 4css px
+let W = 0, H = 0, simW = 0, simH = 0;
+let u0, u1, tex = null, out = null;
+const resize = () => {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  simW = Math.min(380, Math.ceil(W / CELL) + 2);
+  simH = Math.min(280, Math.ceil(H / CELL) + 2);
+  u0 = new Float32Array(simW * simH);
+  u1 = new Float32Array(simW * simH);
+  simCanvas.width = simW; simCanvas.height = simH;
+  out = simCtx.createImageData(simW, simH);
+  buildTexture();
+};
+
+// タイル模様（グラウト線＋交互の淡い濃淡）に水の色味を焼き込む
+function buildTexture() {
+  texCanvas.width = simW; texCanvas.height = simH;
+  const TS = Math.max(6, Math.round(52 / CELL));  // タイル一辺（セル数）
+  const hash = (i, j) => {
+    const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453;
+    return s - Math.floor(s);
+  };
+  for (let j = 0; j * TS < simH + TS; j++) {
+    for (let i = 0; i * TS < simW + TS; i++) {
+      const alt = (i + j) % 2 ? 0.5 : 0.12;
+      const c = mix(C.tile, C.tileB, alt + hash(i, j) * 0.22);
+      texCtx.fillStyle = rgba(c, 1);
+      texCtx.fillRect(i * TS, j * TS, TS, TS);
+    }
+  }
+  texCtx.strokeStyle = rgba(C.grout, 0.9);
+  texCtx.lineWidth = 1;
+  texCtx.beginPath();
+  for (let x = 0; x <= simW; x += TS) { texCtx.moveTo(x + 0.5, 0); texCtx.lineTo(x + 0.5, simH); }
+  for (let y = 0; y <= simH; y += TS) { texCtx.moveTo(0, y + 0.5); texCtx.lineTo(simW, y + 0.5); }
+  texCtx.stroke();
+  // 水の色を薄く焼き込む（浅いプールの水越しの見え方）
+  texCtx.fillStyle = rgba(C.acc, 0.2);
+  texCtx.fillRect(0, 0, simW, simH);
+  texCtx.fillStyle = rgba(C.accD, 0.08);
+  texCtx.fillRect(0, 0, simW, simH);
+  tex = texCtx.getImageData(0, 0, simW, simH).data;
+}
+refreshColors();
+resize();
+window.addEventListener("resize", resize);
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+// ---- 波を起こす ----
+let lastDisturb = performance.now();
+function disturb(px, py, strength, rad) {
+  const cx = Math.round(px / CELL), cy = Math.round(py / CELL);
+  const r = Math.ceil(rad);
+  for (let j = -r; j <= r; j++) {
+    for (let i = -r; i <= r; i++) {
+      const x = cx + i, y = cy + j;
+      if (x < 1 || y < 1 || x >= simW - 1 || y >= simH - 1) continue;
+      const d2 = (i * i + j * j) / (rad * rad);
+      if (d2 > 1) continue;
+      u0[y * simW + x] += strength * Math.exp(-d2 * 3);
+    }
+  }
+  lastDisturb = performance.now();
+}
+
+// ---- 入力（pointer events）----
+let prevPt = null;
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture?.(e.pointerId);
+  disturb(e.clientX, e.clientY, -2.4, 3.4);
+  prevPt = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (prevPt) {
+    const d = Math.hypot(e.clientX - prevPt.x, e.clientY - prevPt.y);
+    if (d > 2) { disturb(e.clientX, e.clientY, -Math.min(1.6, d * 0.06), 2.6); prevPt = { x: e.clientX, y: e.clientY }; }
+  } else {
+    disturb(e.clientX, e.clientY, -0.4, 2); // 触れずになでても、さざ波が立つ
+  }
+});
+const release = () => { prevPt = null; };
+canvas.addEventListener("pointerup", release);
+canvas.addEventListener("pointercancel", release);
+
+// ---- 波動方程式（古典的な 2 バッファ反復・減衰つき）----
+const DAMP = 0.985;
+function simStep() {
+  for (let y = 1; y < simH - 1; y++) {
+    let i = y * simW + 1;
+    for (let x = 1; x < simW - 1; x++, i++) {
+      const v = (u0[i - 1] + u0[i + 1] + u0[i - simW] + u0[i + simW]) * 0.5 - u1[i];
+      u1[i] = v * DAMP;
+    }
+  }
+  const t = u0; u0 = u1; u1 = t;
+}
+
+// ---- 屈折レンダリング：高さ場の勾配で参照座標をずらし、勾配で光らせる ----
+const REFR = 6.5;   // 屈折の強さ（勾配 → 参照座標のずれ）
+const SHINE = 95;   // ハイライトの強さ
+function render() {
+  const d = out.data;
+  const lx = -0.62, ly = -0.78;   // 光の向き（左上から）
+  for (let y = 0; y < simH; y++) {
+    const y0 = y < 1 ? 1 : y > simH - 2 ? simH - 2 : y;
+    for (let x = 0; x < simW; x++) {
+      const x0 = x < 1 ? 1 : x > simW - 2 ? simW - 2 : x;
+      const i = y0 * simW + x0;
+      const gx = u0[i + 1] - u0[i - 1];
+      const gy = u0[i + simW] - u0[i - simW];
+      let sx = (x + gx * REFR) | 0;
+      let sy = (y + gy * REFR) | 0;
+      if (sx < 0) sx = 0; else if (sx >= simW) sx = simW - 1;
+      if (sy < 0) sy = 0; else if (sy >= simH) sy = simH - 1;
+      const ti = (sy * simW + sx) * 4;
+      const spec = Math.tanh((gx * lx + gy * ly) * 1.4) * SHINE; // 飽和を tanh で丸めて白飛び/黒つぶれを防ぐ
+      const o = (y * simW + x) * 4;
+      let r = tex[ti] + spec, g = tex[ti + 1] + spec, b = tex[ti + 2] + spec;
+      d[o]     = r < 0 ? 0 : r > 255 ? 255 : r;
+      d[o + 1] = g < 0 ? 0 : g > 255 ? 255 : g;
+      d[o + 2] = b < 0 ? 0 : b > 255 ? 255 : b;
+      d[o + 3] = 255;
+    }
+  }
+  simCtx.putImageData(out, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(simCanvas, 0, 0, simW * CELL, simH * CELL);
+}
+
+// ---- ループ：固定タイムステップでシミュレーションを進める ----
+let last = performance.now(), acc = 0, dropAcc = 0, nextDrop = 1.4;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  if (!reduced) {           // 雨だれのような自然の波紋
+    dropAcc += dt;
+    if (dropAcc >= nextDrop) {
+      dropAcc = 0;
+      nextDrop = 1.2 + Math.random() * 2.2;
+      disturb(Math.random() * W, Math.random() * H, -(0.9 + Math.random() * 1.1), 2.4 + Math.random() * 1.4);
+    }
+  }
+
+  // reduce 時は操作の余韻（数秒）だけシミュレーションを進めて静止する
+  const active = !reduced || now - lastDisturb < 5000;
+  if (active) {
+    acc = Math.min(acc + dt, 0.1);
+    while (acc >= 1 / 60) { simStep(); acc -= 1 / 60; }
+    render();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

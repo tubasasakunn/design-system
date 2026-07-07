@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>動くマーキー</title>
+<meta name="pattern-title" content="動くマーキー">
+<meta name="pattern-desc" content="逆向きに流れる多段のマーキー。スクロールやドラッグの速さが流速と文字の傾きに乗る。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    cursor: grab;
+  }
+  body.drag { cursor: grabbing; }
+  #stage {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: clamp(4px, 1.4vh, 16px);
+  }
+  .row { overflow: hidden; width: 100%; }
+  .track {
+    display: inline-flex; white-space: nowrap; will-change: transform;
+    transform-origin: center;
+  }
+  .seg {
+    font-weight: 800; line-height: 1.06;
+    padding: 0 .22em;
+    display: inline-block;
+  }
+  .dot { opacity: .5; padding: 0 .28em; }
+  #hint {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="hint">スクロール / 横ドラッグで流れを操る</div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const stage = document.getElementById("stage");
+
+  // 段ごとの語・基準速度(px/s, 符号=向き)・大きさ・色
+  const ROWS = [
+    { text: "しずけさ", words: ["静けさ", "余白", "ゆらぎ"], base: -70, size: "clamp(40px, 9vw, 108px)", tone: "ink" },
+    { text: "hikari", words: ["ひかり", "みずうみ", "こだま"], base:  120, size: "clamp(30px, 6.4vw, 78px)", tone: "accent" },
+    { text: "kaze", words: ["風のかたち", "とおく", "うつろい"], base: -95, size: "clamp(34px, 7.4vw, 90px)", tone: "muted" },
+    { text: "asa", words: ["朝のにおい", "しるし", "めぐる"], base: 150, size: "clamp(24px, 5vw, 60px)", tone: "soft" },
+  ];
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const toneColor = (t) => ({
+    ink: token("--color-fg-primary", "#2c2a26"),
+    soft: token("--color-fg-secondary", "#6c655b"),
+    muted: token("--color-fg-muted", "#a79f91"),
+    accent: token("--color-accent-default", "#5bbcb1"),
+  }[t]);
+
+  const rows = [];
+  for (const cfg of ROWS) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const track = document.createElement("div");
+    track.className = "track";
+    track.style.fontSize = cfg.size;
+    row.appendChild(track);
+    stage.appendChild(row);
+    rows.push({ cfg, track, off: 0, unit: 0, vel: 0 });
+  }
+
+  function applyColors() {
+    for (const r of rows) r.track.style.color = toneColor(r.cfg.tone);
+  }
+
+  // 1 ユニット分のマークアップ（語 + 区切りドット）を作り、画面 2 枚分を超えるまで複製
+  function buildRow(r) {
+    const { track, cfg } = r;
+    track.innerHTML = "";
+    const makeUnit = () => {
+      const frag = document.createDocumentFragment();
+      for (const w of cfg.words) {
+        const s = document.createElement("span");
+        s.className = "seg";
+        s.textContent = w;
+        frag.appendChild(s);
+        const d = document.createElement("span");
+        d.className = "seg dot";
+        d.textContent = "◦";
+        frag.appendChild(d);
+      }
+      return frag;
+    };
+    track.appendChild(makeUnit());
+    const unit = track.scrollWidth;
+    r.unit = unit || 1;
+    // ビューポート 2 枚分 + 1 ユニットを満たすまで足す（継ぎ目なしループ用）
+    const need = window.innerWidth * 2 + unit;
+    let guard = 0;
+    while (track.scrollWidth < need && guard++ < 40) track.appendChild(makeUnit());
+    // 開始位置を分散
+    r.off = -Math.random() * unit;
+  }
+
+  function buildAll() { for (const r of rows) buildRow(r); applyColors(); }
+
+  new MutationObserver(applyColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+
+  // ---- 入力: ホイール & 横ドラッグ → 共有の外力 push（減衰） ----
+  let push = 0; // px/s の追加速度
+  window.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    push += d * 3.2;
+    push = Math.max(-4200, Math.min(4200, push));
+  }, { passive: false });
+
+  let dragging = false, lastX = 0, lastT = 0;
+  window.addEventListener("pointerdown", (e) => {
+    dragging = true; lastX = e.clientX; lastT = performance.now();
+    document.body.classList.add("drag");
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const now = performance.now();
+    const dx = e.clientX - lastX;
+    const dt = Math.max(1, now - lastT) / 1000;
+    // ドラッグ中は直接位置を動かしつつ、離した後に効く速度も蓄える
+    for (const r of rows) { r.off += dx; }
+    push = push * 0.6 + (dx / dt) * 0.9;
+    push = Math.max(-4200, Math.min(4200, push));
+    lastX = e.clientX; lastT = now;
+  });
+  const endDrag = () => { dragging = false; document.body.classList.remove("drag"); };
+  window.addEventListener("pointerup", endDrag);
+  window.addEventListener("pointercancel", endDrag);
+
+  let ro;
+  window.addEventListener("resize", () => {
+    clearTimeout(ro); ro = setTimeout(buildAll, 150);
+  });
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    // 外力はゆっくり減衰して基準流に戻る
+    if (!dragging) push *= Math.exp(-2.6 * dt);
+    if (Math.abs(push) < 0.5) push = 0;
+
+    for (const r of rows) {
+      const base = reduce.matches ? 0 : r.cfg.base;
+      const speed = base + push;           // この段の実効速度
+      if (!dragging) r.off += speed * dt;
+      // ユニット幅でラップ（継ぎ目なし）
+      const u = r.unit;
+      if (r.off <= -u) r.off += u * Math.ceil(-r.off / u);
+      else if (r.off > 0) r.off -= u * Math.ceil(r.off / u);
+      // 速さに応じたイタリック（skewX）。速いほど寝る。
+      const skew = Math.max(-22, Math.min(22, -speed * 0.028));
+      r.track.style.transform = `translateX(${r.off.toFixed(2)}px) skewX(${skew.toFixed(2)}deg)`;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  buildAll();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

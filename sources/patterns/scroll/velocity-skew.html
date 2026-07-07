@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="速度で歪むリスト">
+<meta name="pattern-desc" content="スクロール速度に応じてリスト項目が skew と scale で歪み、止まるとばねで戻る。速度メーター付き。">
+<title>速度で歪むリスト</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .stage { max-width: 720px; margin: 0 auto; padding: 30vh 6vw 40vh; }
+  .stage > header { margin-bottom: 8vh; }
+  .stage h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); font-weight: 300; letter-spacing: .02em; }
+  .stage .sub { margin-top: 8px; font-size: .82rem; letter-spacing: .16em; color: var(--color-fg-muted); }
+  ul { list-style: none; }
+  .row {
+    display: flex; align-items: center; gap: 18px;
+    padding: 22px 26px; margin: 14px 0;
+    border-radius: 22px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--color-fg-primary) 6%, transparent);
+    transform-origin: center center;
+    will-change: transform;
+  }
+  .row .idx {
+    flex: 0 0 auto; width: 44px; height: 44px; border-radius: 14px;
+    display: grid; place-items: center; font-size: .9rem; font-weight: 600;
+    color: var(--color-accent-fg);
+    background: color-mix(in srgb, var(--color-accent-default) 22%, var(--color-bg-elevated));
+  }
+  .row .txt { flex: 1 1 auto; }
+  .row .txt b { display: block; font-size: 1.02rem; font-weight: 550; letter-spacing: .01em; }
+  .row .txt span { display: block; margin-top: 3px; font-size: .78rem; color: var(--color-fg-secondary); }
+  .row .tag { flex: 0 0 auto; font-size: .72rem; letter-spacing: .12em; color: var(--color-fg-muted); }
+
+  /* 速度メーター */
+  .meter {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    z-index: 6; width: min(360px, 82vw);
+    padding: 12px 16px 14px; border-radius: 20px; pointer-events: none;
+    background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);
+    border: 1px solid var(--color-border-default); backdrop-filter: blur(10px);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--color-fg-primary) 8%, transparent);
+  }
+  .meter .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .meter .head span { font-size: .68rem; letter-spacing: .2em; color: var(--color-fg-muted); }
+  .meter .head b { font-size: .8rem; font-variant-numeric: tabular-nums; color: var(--color-fg-secondary); }
+  .meter .bar { position: relative; height: 8px; border-radius: 8px; background: var(--color-bg-secondary); overflow: hidden; }
+  .meter .bar i {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 8px;
+    background: linear-gradient(90deg, var(--color-accent-default), var(--color-status-warning));
+  }
+</style>
+</head>
+<body>
+<main class="stage">
+  <header>
+    <h1>速度で歪むリスト</h1>
+    <div class="sub">SCROLL VELOCITY · SPRING BACK</div>
+  </header>
+  <ul id="list"></ul>
+</main>
+
+<div class="meter">
+  <div class="head"><span>速度</span><b id="vlabel">0.00</b></div>
+  <div class="bar"><i id="vbar"></i></div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  // リスト生成
+  const DATA = [
+    ["水面のさざなみ", "触れると同心円が広がる", "WATER"],
+    ["三次元の等高線", "傾けて見おろす地形図", "3D MAP"],
+    ["浮かびあがる文", "スクロールで語が定着", "TYPE"],
+    ["ぽよぽよの粒", "押すと戻るソフトボディ", "SOFT"],
+    ["昼から夜へ", "空が茜から紺へ沈む", "LIGHT"],
+    ["多層の丘", "速度差で奥行きが立つ", "DEPTH"],
+    ["目覚める数字", "到達で数がカウント", "STATS"],
+    ["きらめく粒子", "指先に群れが集まる", "FLOW"],
+    ["やわらかな影", "光の角度で伸び縮み", "SHADOW"],
+    ["静かな遷移", "頁は溶けて入れ替わる", "TRANS"],
+  ];
+  const list = document.getElementById("list");
+  const rows = DATA.map(([t, d, tag], i) => {
+    const li = document.createElement("li");
+    li.className = "row";
+    li.innerHTML = `<div class="idx">${String(i + 1).padStart(2, "0")}</div>
+      <div class="txt"><b></b><span></span></div><div class="tag"></div>`;
+    li.querySelector("b").textContent = t;
+    li.querySelector("span").textContent = d;
+    li.querySelector(".tag").textContent = tag;
+    list.appendChild(li);
+    return li;
+  });
+
+  const vbar = document.getElementById("vbar");
+  const vlabel = document.getElementById("vlabel");
+
+  // ---- 速度追跡 ----
+  let lastScroll = scrollY;
+  let rawVel = 0;      // px/s（生）
+  // ばねモデル：歪みは速度に引かれ、静止でゼロへ戻る。減衰つき2次系で「ばね感」を作る
+  let skew = 0, skewVel = 0;   // 現在の歪み量とその速度（バネの状態変数）
+  let velSmooth = 0;           // 表示用に均した速度
+
+  addEventListener("scroll", () => {
+    // scroll イベント間の実移動から瞬間速度を推定（フレームでも上書きするので概算で十分）
+  }, { passive: true });
+
+  const MAXV = 2600; // メーター満タンとみなす速度(px/s)
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000)); last = now;
+
+    // 実スクロール量から速度（px/s）
+    const dy = scrollY - lastScroll; lastScroll = scrollY;
+    rawVel = rawVel * 0.6 + (dy / dt) * 0.4; // 軽く均す
+    const vNorm = clamp(rawVel / MAXV, -1.4, 1.4); // 正規化速度（符号つき）
+
+    // ばね：目標歪み = 速度に比例。k=剛性, c=減衰
+    const target = rm.matches ? 0 : vNorm;
+    const k = 180, c = 22;
+    const accel = k * (target - skew) - c * skewVel;
+    skewVel += accel * dt;
+    skew += skewVel * dt;
+
+    // 表示速度（絶対値を平滑化）
+    velSmooth += (Math.abs(rawVel) - velSmooth) * (1 - Math.exp(-dt * 8));
+
+    // 各行へ歪みを配る。中央から遠い行ほど遅れて追従（弾性のうねり）
+    const cy = innerHeight * 0.5;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const rect = r.getBoundingClientRect();
+      if (rect.bottom < -80 || rect.top > innerHeight + 80) { r.style.transform = ""; continue; }
+      const dist = (rect.top + rect.height * 0.5 - cy) / innerHeight; // -0.5..0.5 付近
+      const lag = 1 - Math.min(0.5, Math.abs(dist)) * 0.7;            // 中央ほど強く歪む
+      const s = skew * lag;
+      const skewDeg = clamp(s * 9, -14, 14);          // skewY 角度
+      const scaleY = 1 + clamp(Math.abs(s) * 0.14, 0, 0.22);  // 縦に伸びる
+      const scaleX = 1 - clamp(Math.abs(s) * 0.06, 0, 0.10);
+      const tx = clamp(s * 12, -22, 22);              // わずかに横ずれ
+      r.style.transform =
+        `translateX(${tx.toFixed(2)}px) skewY(${skewDeg.toFixed(2)}deg) scale(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)})`;
+    }
+
+    // メーター
+    const m = clamp(velSmooth / MAXV, 0, 1);
+    vbar.style.width = (m * 100).toFixed(1) + "%";
+    vlabel.textContent = (velSmooth / 1000).toFixed(2);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  new MutationObserver(() => {}).observe(document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+})();
+</script>
+</body>
+</html>

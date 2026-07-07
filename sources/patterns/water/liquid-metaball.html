@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="メタボールの液体">
+<meta name="pattern-desc" content="スカラー場のしきい値化で融合・分裂するブロブがポインタに引き寄せられて漂う液体表現。">
+<title>メタボールの液体</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(120% 120% at 30% 20%,
+      var(--color-bg-elevated), var(--color-bg-primary) 60%, var(--color-bg-secondary));
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>メタボールの液体</h1>
+  <p>近づくと溶け合い、離れるとちぎれる液体のかたまり。ポインタを置くと集まってきます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let edgeC, coreC, rimC;
+  function readColors() {
+    const elevated = hex(token("--color-bg-elevated", "#fffdf9"));
+    const accent = hex(token("--color-accent-default", "#5bbcb1"));
+    const hover = hex(token("--color-accent-hover", "#46a89d"));
+    const deep = hex(token("--color-accent-fg", "#07312d"));
+    edgeC = mix(elevated, accent, 0.52);   // 縁: 淡いアクア
+    coreC = mix(hover, deep, 0.42);        // 芯: 深いティール
+    rimC = mix(elevated, accent, 0.12);    // 左上のリムライト
+  }
+
+  // ---- 場（スカラーフィールド）----
+  const CS = 3;                            // 1 セル = 3 css px
+  let W = 0, H = 0, gw = 0, gh = 0;
+  let field = new Float32Array(0);
+  let off, octx, img;
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    gw = Math.ceil(W / CS) + 1;
+    gh = Math.ceil(H / CS) + 1;
+    field = new Float32Array(gw * gh);
+    off = document.createElement("canvas");
+    off.width = gw; off.height = gh;
+    octx = off.getContext("2d");
+    img = octx.createImageData(gw, gh);
+  }
+
+  // ---- ブロブの物理 ----
+  const NB = 8;
+  const blobs = [];
+  function initBlobs() {
+    blobs.length = 0;
+    const base = Math.min(W, H);
+    for (let i = 0; i < NB; i++) {
+      blobs.push({
+        x: W * (0.25 + Math.random() * 0.5),
+        y: H * (0.25 + Math.random() * 0.5),
+        vx: 0, vy: 0,
+        r: base * (0.055 + Math.random() * 0.055),
+        p1: Math.random() * 6.283, p2: Math.random() * 6.283,
+        f1: 0.25 + Math.random() * 0.35, f2: 0.2 + Math.random() * 0.3,
+      });
+    }
+  }
+
+  let px = -1, py = -1, pActive = false, t = 0;
+  function physics(dt) {
+    t += dt;
+    const cx = W / 2, cy = H / 2;
+    for (const b of blobs) {
+      // ゆらゆらとした自律遊泳（reduce では停止し、操作起点の引力のみ）
+      if (!rm.matches) {
+        b.vx += Math.cos(t * b.f1 + b.p1) * 42 * dt;
+        b.vy += Math.sin(t * b.f2 + b.p2) * 42 * dt;
+      }
+      // 画面中央への弱い復元力（散逸を防ぐ）
+      b.vx += (cx - b.x) * 0.12 * dt;
+      b.vy += (cy - b.y) * 0.12 * dt;
+      // ポインタへの引力（近いほど強く、極近では飽和）
+      if (pActive) {
+        const dx = px - b.x, dy = py - b.y;
+        const d2 = dx * dx + dy * dy;
+        const g = 26000 / (d2 + 8000);
+        b.vx += dx * g * dt;
+        b.vy += dy * g * dt;
+      }
+      // ブロブ同士の弱い反発（完全に一塊にならないための呼吸）
+      for (const o of blobs) {
+        if (o === b) continue;
+        const dx = b.x - o.x, dy = b.y - o.y;
+        const d = Math.hypot(dx, dy) + 1e-4;
+        const near = (b.r + o.r) * 0.9;
+        if (d < near) {
+          const f = (near - d) / near * 60;
+          b.vx += (dx / d) * f * dt;
+          b.vy += (dy / d) * f * dt;
+        }
+      }
+      b.vx *= Math.pow(0.35, dt);
+      b.vy *= Math.pow(0.35, dt);
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      // 画面端でやわらかく跳ね返す
+      const m = b.r * 0.6;
+      if (b.x < m) { b.x = m; b.vx = Math.abs(b.vx) * 0.6; }
+      if (b.x > W - m) { b.x = W - m; b.vx = -Math.abs(b.vx) * 0.6; }
+      if (b.y < m) { b.y = m; b.vy = Math.abs(b.vy) * 0.6; }
+      if (b.y > H - m) { b.y = H - m; b.vy = -Math.abs(b.vy) * 0.6; }
+    }
+  }
+
+  // ---- 場の評価としきい値レンダリング ----
+  function render() {
+    field.fill(0);
+    for (const b of blobs) {
+      const gx = b.x / CS, gy = b.y / CS, gr = b.r / CS;
+      const R = gr * 2.8;
+      const x0 = Math.max(0, Math.floor(gx - R)), x1 = Math.min(gw - 1, Math.ceil(gx + R));
+      const y0 = Math.max(0, Math.floor(gy - R)), y1 = Math.min(gh - 1, Math.ceil(gy + R));
+      const r2 = gr * gr;
+      const cut = r2 / (R * R + 1);            // 打ち切り半径で 0 に漸近させ、箱の継ぎ目を消す
+      for (let y = y0; y <= y1; y++) {
+        const dy = y - gy;
+        let i = y * gw + x0;
+        for (let x = x0; x <= x1; x++, i++) {
+          const dx = x - gx;
+          const v = r2 / (dx * dx + dy * dy + 1) - cut;
+          if (v > 0) field[i] += v;
+        }
+      }
+    }
+    const d = img.data;
+    const T0 = 0.82, T1 = 1.06;             // 融合のしきい値帯
+    const row2 = gw * 2 + 2;                 // 左上 2 セル分のオフセット（擬似リムライト）
+    for (let i = 0, p = 0; i < field.length; i++, p += 4) {
+      const f = field[i];
+      if (f <= T0) { d[p + 3] = 0; continue; }
+      let a = (f - T0) / (T1 - T0);
+      if (a > 1) a = 1;
+      a = a * a * (3 - 2 * a);               // smoothstep で縁をなめらかに
+      let g = (f - T1) / 2.4;                // 芯の深まり
+      if (g < 0) g = 0; else if (g > 1) g = 1;
+      let r = edgeC[0] + (coreC[0] - edgeC[0]) * g;
+      let gc = edgeC[1] + (coreC[1] - edgeC[1]) * g;
+      let bl = edgeC[2] + (coreC[2] - edgeC[2]) * g;
+      // 左上に向かって場が減る縁 = 光を受ける面
+      const ful = i >= row2 ? field[i - row2] : f;
+      let hl = (f - ful) * 2.2 * (1 - g);
+      if (hl > 0) {
+        if (hl > 1) hl = 1;
+        r += (rimC[0] - r) * hl;
+        gc += (rimC[1] - gc) * hl;
+        bl += (rimC[2] - bl) * hl;
+      }
+      d[p] = r; d[p + 1] = gc; d[p + 2] = bl;
+      d[p + 3] = a * 255;
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(off, 0, 0, gw, gh, 0, 0, gw * CS, gh * CS);
+  }
+
+  // ---- 入力 ----
+  canvas.addEventListener("pointermove", (e) => { px = e.clientX; py = e.clientY; pActive = true; });
+  canvas.addEventListener("pointerdown", (e) => { px = e.clientX; py = e.clientY; pActive = true; });
+  canvas.addEventListener("pointerleave", () => { pActive = false; });
+  canvas.addEventListener("pointercancel", () => { pActive = false; });
+
+  // ---- メインループ ----
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+    physics(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+
+  addEventListener("resize", () => { resize(); });
+  resize();
+  initBlobs();
+  readColors();
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

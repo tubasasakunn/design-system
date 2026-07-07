@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="覗き込む部屋">
+<meta name="pattern-desc" content="CSS 3D の多層レイヤーで組んだ小さな部屋。ポインタの動きに合わせて視点が傾き、奥のものほど静かに揺れる。">
+<title>覗き込む部屋</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    display: grid; place-items: center;
+    touch-action: none;
+  }
+  .stage {
+    width: 100%; height: 100%;
+    display: grid; place-items: center;
+    perspective: 950px;
+    overflow: hidden;
+  }
+  .fit { transform-style: preserve-3d; }         /* 画面に合わせて等倍縮尺 */
+  .world { transform-style: preserve-3d; will-change: transform; }
+  .world * { position: absolute; left: 50%; top: 50%; transform-style: preserve-3d; }
+
+  /* ---- 部屋の器（幅 900 × 高 560 × 奥行 840）---- */
+  .wall-back-piece { background: color-mix(in srgb, var(--color-bg-secondary) 88%, var(--color-accent-default) 4%); }
+  .wall-side {
+    width: 840px; height: 560px;
+    background: linear-gradient(90deg,
+      color-mix(in srgb, var(--color-bg-secondary) 80%, var(--color-fg-muted) 8%),
+      color-mix(in srgb, var(--color-bg-secondary) 96%, var(--color-bg-elevated) 4%));
+  }
+  .wall-left  { transform: translate(-50%,-50%) rotateY(90deg)  translateZ(-450px); }
+  .wall-right { transform: translate(-50%,-50%) rotateY(-90deg) translateZ(-450px);
+    background: linear-gradient(-90deg,
+      color-mix(in srgb, var(--color-bg-secondary) 80%, var(--color-fg-muted) 8%),
+      color-mix(in srgb, var(--color-bg-secondary) 96%, var(--color-bg-elevated) 4%)); }
+  .floor {
+    width: 900px; height: 840px;
+    transform: translate(-50%,-50%) translateY(280px) rotateX(90deg);
+    background: linear-gradient(0deg,
+      color-mix(in srgb, var(--color-bg-secondary) 72%, var(--color-fg-muted) 14%),
+      color-mix(in srgb, var(--color-bg-secondary) 90%, var(--color-fg-muted) 4%));
+  }
+  .ceiling {
+    width: 900px; height: 840px;
+    transform: translate(-50%,-50%) translateY(-280px) rotateX(90deg);
+    background: color-mix(in srgb, var(--color-bg-elevated) 92%, var(--color-fg-muted) 3%);
+  }
+  .rug {
+    left: 50%; top: 58%;
+    width: 460px; height: 320px; border-radius: 50%;
+    transform: translate(-50%,-50%);
+    background: color-mix(in srgb, #5bbcb1 22%, transparent);
+    border: 2px solid color-mix(in srgb, #5bbcb1 34%, transparent);
+  }
+
+  /* ---- 窓の向こうの外界（壁より奥 = 視差が最も大きい層）---- */
+  .outside {
+    width: 1250px; height: 800px;
+    transform: translate(-50%,-50%) translateZ(-620px);
+    background: linear-gradient(180deg,
+      color-mix(in srgb, #9fc8ea 55%, var(--color-bg-primary)),
+      color-mix(in srgb, #f1d189 34%, var(--color-bg-primary)) 70%,
+      color-mix(in srgb, #a9dcc0 40%, var(--color-bg-primary)));
+  }
+  .moon {
+    left: 60%; top: 26%; width: 110px; height: 110px; border-radius: 50%;
+    transform: translate(-50%,-50%);
+    background: var(--color-bg-elevated);
+    box-shadow: 0 0 60px 22px color-mix(in srgb, var(--color-bg-elevated) 55%, transparent);
+  }
+  .hill { border-radius: 50% 50% 0 0; background: color-mix(in srgb, #a9dcc0 55%, var(--color-bg-secondary)); }
+  .hill1 { left: 28%; top: 100%; width: 700px; height: 300px; transform: translate(-50%,-62%); }
+  .hill2 { left: 74%; top: 100%; width: 800px; height: 380px; transform: translate(-50%,-52%);
+    background: color-mix(in srgb, #a9dcc0 34%, var(--color-bg-secondary)); }
+
+  /* ---- 奥の壁は「窓の穴」を残して 4 枚で組む ---- */
+  .wb { width: 900px; height: 560px; }
+  /* 窓穴: 中央 x=-40±150, y=-40±170。壁の外側まで大きく張り出させ、覗いても隙間が出ないようにする */
+  .wb-top    { transform: translate(-50%,-50%) translateZ(-420px); width: 1800px; height: 320px; margin-top: -370px; }
+  .wb-bottom { transform: translate(-50%,-50%) translateZ(-420px); width: 1800px; height: 320px; margin-top: 290px; }
+  .wb-left   { transform: translate(-50%,-50%) translateZ(-420px); width: 640px; height: 1000px; margin-left: -510px; }
+  .wb-right  { transform: translate(-50%,-50%) translateZ(-420px); width: 720px; height: 1000px; margin-left: 470px; }
+  .window-frame {
+    width: 320px; height: 360px;
+    transform: translate(-50%,-50%) translate3d(-40px,-40px,-419px);
+    border: 10px solid color-mix(in srgb, var(--color-fg-secondary) 55%, var(--color-bg-secondary));
+    border-radius: 14px;
+    background: transparent;
+  }
+  .window-frame::before, .window-frame::after {
+    content: ""; position: absolute; background: color-mix(in srgb, var(--color-fg-secondary) 55%, var(--color-bg-secondary));
+  }
+  .window-frame::before { left: 50%; top: 0; width: 8px; height: 100%; transform: translateX(-50%); }
+  .window-frame::after { left: 0; top: 42%; width: 100%; height: 8px; }
+  .picture {
+    width: 120px; height: 150px; border-radius: 10px;
+    transform: translate(-50%,-50%) translate3d(300px,-70px,-418px);
+    background: color-mix(in srgb, #f0a8bd 40%, var(--color-bg-elevated));
+    border: 6px solid color-mix(in srgb, var(--color-fg-secondary) 45%, var(--color-bg-secondary));
+  }
+  .picture i {
+    left: 50%; top: 62%; width: 76px; height: 76px; border-radius: 50% 50% 0 0;
+    transform: translate(-50%,-50%);
+    background: color-mix(in srgb, #bcb2e8 70%, transparent);
+  }
+
+  /* ---- 窓から差す光 ---- */
+  .shaft {
+    width: 320px; height: 620px;
+    transform: translate(-50%,-50%) translate3d(-20px,120px,-240px) rotateX(58deg) skewX(-14deg);
+    background: linear-gradient(180deg,
+      color-mix(in srgb, #f1d189 34%, transparent),
+      transparent 85%);
+    filter: blur(6px);
+    pointer-events: none;
+  }
+
+  /* ---- 家具のシルエット（立て看板式のフラット層）---- */
+  .prop { transform-origin: 50% 100%; }
+  .silh { background: color-mix(in srgb, var(--color-fg-secondary) 78%, var(--color-bg-secondary)); }
+  /* 観葉植物（最奥）*/
+  .plant { transform: translate(-50%,-100%) translate3d(-388px,278px,-330px); width: 150px; height: 250px; }
+  .plant .pot { left: 50%; top: 100%; width: 84px; height: 74px; transform: translate(-50%,-100%);
+    border-radius: 10px 10px 22px 22px; }
+  .plant .leaf { width: 26px; height: 150px; border-radius: 50% 50% 40% 40%; left: 50%; top: 100%; }
+  .plant .l1 { transform: translate(-50%,-100%) translateY(-58px) rotate(-28deg); }
+  .plant .l2 { transform: translate(-50%,-100%) translateY(-64px) rotate(0deg); height: 178px; }
+  .plant .l3 { transform: translate(-50%,-100%) translateY(-58px) rotate(28deg); }
+  /* テーブルと花瓶（中景）*/
+  .table { transform: translate(-50%,-100%) translate3d(190px,278px,-170px); width: 260px; height: 190px; }
+  .table .top { left: 50%; top: 42%; width: 260px; height: 16px; border-radius: 8px; transform: translate(-50%,0); }
+  .table .leg1 { left: 14%; top: 46%; width: 12px; height: 108px; border-radius: 6px; }
+  .table .leg2 { left: 82%; top: 46%; width: 12px; height: 108px; border-radius: 6px; }
+  .table .vase { left: 50%; top: 42%; width: 44px; height: 62px; transform: translate(-50%,-100%);
+    border-radius: 40% 40% 50% 50%; background: color-mix(in srgb, #5bbcb1 65%, var(--color-fg-secondary)); }
+  .table .stem { left: 50%; top: 42%; width: 4px; height: 60px; transform: translate(-50%,-188%) rotate(8deg); }
+  .table .bud { left: 50%; top: 42%; width: 26px; height: 26px; border-radius: 50%;
+    transform: translate(-32%,-460%); background: color-mix(in srgb, #f3a890 80%, var(--color-fg-secondary)); }
+  /* フロアランプ（手前・視差大）*/
+  .lamp { transform: translate(-50%,-100%) translate3d(-185px,278px,-60px); width: 170px; height: 330px; }
+  .lamp .pole { left: 50%; top: 100%; width: 10px; height: 250px; transform: translate(-50%,-100%); border-radius: 5px; }
+  .lamp .base { left: 50%; top: 100%; width: 110px; height: 14px; transform: translate(-50%,-100%); border-radius: 7px; }
+  .lamp .shade { left: 50%; top: 0; width: 150px; height: 96px; transform: translate(-50%,0);
+    border-radius: 16px 16px 6px 6px;
+    background: color-mix(in srgb, #f1d189 66%, var(--color-fg-secondary));
+    clip-path: polygon(14% 0, 86% 0, 100% 100%, 0 100%); }
+  .lamp .glow { left: 50%; top: 46px; width: 300px; height: 300px; border-radius: 50%;
+    transform: translate(-50%,-50%);
+    background: radial-gradient(circle, color-mix(in srgb, #f1d189 42%, transparent), transparent 65%);
+    pointer-events: none; }
+  /* 猫（最前・視差最大）*/
+  .cat { transform: translate(-50%,-100%) translate3d(60px,282px,40px); width: 140px; height: 120px; }
+  .cat .body { left: 50%; top: 100%; width: 104px; height: 84px; transform: translate(-50%,-100%);
+    border-radius: 50% 50% 42% 42%; }
+  .cat .head { left: 26%; top: 6%; width: 58px; height: 52px; border-radius: 50%; transform: translate(-50%,0); }
+  .cat .ear1 { left: 12%; top: 0; width: 0; height: 0; border: 12px solid transparent;
+    border-bottom: 20px solid color-mix(in srgb, var(--color-fg-secondary) 78%, var(--color-bg-secondary));
+    transform: translateY(-8px) rotate(-14deg); background: none; }
+  .cat .ear2 { left: 30%; top: 0; width: 0; height: 0; border: 12px solid transparent;
+    border-bottom: 20px solid color-mix(in srgb, var(--color-fg-secondary) 78%, var(--color-bg-secondary));
+    transform: translateY(-8px) rotate(14deg); background: none; }
+  .cat .tail { left: 76%; top: 32%; width: 16px; height: 88px;
+    border-radius: 8px; transform-origin: 50% 90%; transform: rotate(-24deg);
+    animation: tail 3.4s ease-in-out infinite; }
+  @keyframes tail { 0%,100% { transform: rotate(-24deg); } 50% { transform: rotate(-6deg); } }
+
+  /* ---- ペンダントライト ---- */
+  .pendant { transform: translate(-50%,-50%) translate3d(0,-280px,-200px); width: 80px; height: 150px; }
+  .pendant .cord { left: 50%; top: 0; width: 3px; height: 92px; transform: translateX(-50%); }
+  .pendant .shade { left: 50%; top: 92px; width: 64px; height: 42px; transform: translateX(-50%);
+    border-radius: 8px 8px 24px 24px; }
+  .pendant .bulb { left: 50%; top: 128px; width: 18px; height: 18px; border-radius: 50%;
+    transform: translateX(-50%);
+    background: #f1d189; box-shadow: 0 0 34px 10px color-mix(in srgb, #f1d189 55%, transparent); }
+
+  /* ---- 塵（漂う微粒子）---- */
+  .mote { width: 5px; height: 5px; border-radius: 50%;
+    background: color-mix(in srgb, var(--color-bg-elevated) 90%, transparent);
+    box-shadow: 0 0 8px 2px color-mix(in srgb, #f1d189 30%, transparent);
+    animation: float 9s ease-in-out infinite; }
+  .m1 { transform: translate3d(-80px,-40px,-120px); animation-delay: 0s; }
+  .m2 { transform: translate3d(40px,30px,-260px); animation-delay: -3s; animation-duration: 12s; }
+  .m3 { transform: translate3d(-160px,90px,-40px); animation-delay: -6s; animation-duration: 10s; }
+  .m4 { transform: translate3d(140px,-90px,-320px); animation-delay: -8s; animation-duration: 14s; }
+  @keyframes float {
+    0%,100% { margin-top: 0; opacity: .25; }
+    50% { margin-top: -34px; opacity: .8; }
+  }
+
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 320px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none; z-index: 10;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.7; color: var(--color-fg-muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cat .tail, .mote { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="fit" id="fit">
+    <div class="world" id="world">
+      <div class="outside"><div class="moon"></div><div class="hill hill1"></div><div class="hill hill2"></div></div>
+      <div class="wall-back-piece wb wb-top"></div>
+      <div class="wall-back-piece wb wb-bottom"></div>
+      <div class="wall-back-piece wb wb-left"></div>
+      <div class="wall-back-piece wb wb-right"></div>
+      <div class="window-frame"></div>
+      <div class="picture"><i></i></div>
+      <div class="wall-side wall-left"></div>
+      <div class="wall-side wall-right"></div>
+      <div class="floor"><div class="rug"></div></div>
+      <div class="ceiling"></div>
+      <div class="shaft"></div>
+      <div class="prop plant"><div class="silh leaf l1"></div><div class="silh leaf l2"></div><div class="silh leaf l3"></div><div class="silh pot"></div></div>
+      <div class="prop table"><div class="silh top"></div><div class="silh leg1"></div><div class="silh leg2"></div><div class="vase"></div><div class="silh stem"></div><div class="bud"></div></div>
+      <div class="prop pendant"><div class="silh cord"></div><div class="silh shade"></div><div class="bulb"></div></div>
+      <div class="prop lamp"><div class="glow"></div><div class="silh pole"></div><div class="silh base"></div><div class="shade"></div></div>
+      <div class="prop cat"><div class="silh tail"></div><div class="silh body"></div><div class="silh head"></div><div class="ear1"></div><div class="ear2"></div></div>
+      <div class="mote m1"></div><div class="mote m2"></div><div class="mote m3"></div><div class="mote m4"></div>
+    </div>
+  </div>
+</div>
+<div class="caption">
+  <h1>覗き込む部屋</h1>
+  <p>ポインタを動かすと部屋を覗き込む視点になります。窓の外・壁・家具・猫、奥のものほど小さく揺れます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const world = document.getElementById("world");
+  const fit = document.getElementById("fit");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // 画面サイズに合わせて部屋を等倍縮尺（部屋の設計は 900×560 前提）
+  function resize() {
+    const s = Math.min(innerWidth / 1050, innerHeight / 760, 1.15);
+    fit.style.transform = `scale(${s})`;
+  }
+
+  // ポインタ → 目標角。rAF で臨界減衰風に追従（ぽよっと柔らかい遅れ）
+  let tx = 0, ty = 0;          // 目標 (rotY, rotX)
+  let rx = 0, ry = 0, vx = 0, vy = 0;
+  let idle = 0;                // 最後の入力からの経過秒
+  addEventListener("pointermove", (e) => {
+    const nx = (e.clientX / innerWidth) * 2 - 1;
+    const ny = (e.clientY / innerHeight) * 2 - 1;
+    ty = nx * 9;               // rotateY: 左右の覗き込み
+    tx = -ny * 6;              // rotateX: 上下
+    idle = 0;
+  });
+  addEventListener("pointerdown", (e) => {
+    // タッチ単発でも反応するように
+    const nx = (e.clientX / innerWidth) * 2 - 1;
+    const ny = (e.clientY / innerHeight) * 2 - 1;
+    ty = nx * 9; tx = -ny * 6; idle = 0;
+  });
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+    idle += dt;
+
+    let gx = tx, gy = ty;
+    if (!rm.matches && idle > 3) {
+      // しばらく触れないと、ゆっくり息をするように揺れる
+      const t = now / 1000;
+      gx = Math.sin(t * 0.35) * 2.2;
+      gy = Math.cos(t * 0.27) * 3.4;
+    }
+    // ばね + 減衰（角度単位）: x'' = k(target - x) - c x'
+    const k = 34, c = 9.5;
+    vx += (k * (gx - rx) - c * vx) * dt;
+    vy += (k * (gy - ry) - c * vy) * dt;
+    rx += vx * dt; ry += vy * dt;
+
+    // 覗き込み: 回転 + わずかな平行移動（頭の移動）
+    world.style.transform =
+      `translate3d(${-ry * 3.2}px, ${rx * 2.4}px, 60px) rotateX(${rx}deg) rotateY(${ry}deg)`;
+    requestAnimationFrame(frame);
+  }
+
+  addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

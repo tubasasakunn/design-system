@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ぐにゃりカード">
+<meta name="pattern-desc" content="ドラッグするとメッシュがぐにゃっと歪み、離すとばねで元の形に戻るカード。歪みに合わせて影も追従する。">
+<title>ぐにゃりカード</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-secondary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #stage.grabbing { cursor: grabbing; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">カードをドラッグしてぐにゃっと歪ませる ─ 離すとばねで戻る</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h = h.replace("#",""); if (h.length===3) h = h.replace(/./g,c=>c+c);
+  const n = parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const rgba = (c,a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const C = {};
+const refresh = () => {
+  C.face   = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.faceLo = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.acc    = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accHi  = hexRgb(token("--color-accent-hover", "#46a89d"));
+  C.ink    = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.muted  = hexRgb(token("--color-fg-muted", "#a79f91"));
+  C.border = hexRgb(token("--color-border-default", "#ece6db"));
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme","data-appearance"]});
+
+let W=0,H=0,dpr=1;
+const resize = () => {
+  dpr = Math.min(2, window.devicePixelRatio||1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W*dpr); canvas.height = Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  layout();
+};
+window.addEventListener("resize", resize);
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change",(e)=>{ reduced = e.matches; });
+
+// ---- メッシュ（マス・ばね格子）----
+const NX = 7, NY = 9;
+let CW=0, CH=0, ox=0, oy=0, restLenX=0, restLenY=0;
+const nodes = []; // {x,y,vx,vy,rx,ry}
+function layout(){
+  CW = Math.min(340, W*0.62); CH = Math.min(CW*1.32, H*0.62);
+  ox = (W-CW)/2; oy = (H-CH)/2;
+  restLenX = CW/(NX-1); restLenY = CH/(NY-1);
+  nodes.length = 0;
+  for (let j=0;j<NY;j++) for (let i=0;i<NX;i++){
+    const rx = ox+i*restLenX, ry = oy+j*restLenY;
+    nodes.push({x:rx,y:ry,vx:0,vy:0,rx,ry});
+  }
+}
+const idx = (i,j)=>j*NX+i;
+
+// ---- 物理 ----
+const K_STRUCT = 260;   // 隣接ばね（形状維持）
+const K_ANCHOR = 26;    // 静止位置への復元（確実に戻す）
+const DAMP = 6.2;       // 速度減衰
+function step(dt){
+  // 隣接ばねの力
+  const fx = new Float64Array(nodes.length), fy = new Float64Array(nodes.length);
+  const spring = (a,b,rest) => {
+    const na=nodes[a], nb=nodes[b];
+    let dx=nb.x-na.x, dy=nb.y-na.y; const d=Math.hypot(dx,dy)||1e-6;
+    const f=K_STRUCT*(d-rest)/d;
+    const px=f*dx, py=f*dy;
+    fx[a]+=px; fy[a]+=py; fx[b]-=px; fy[b]-=py;
+  };
+  for (let j=0;j<NY;j++) for (let i=0;i<NX;i++){
+    if (i<NX-1) spring(idx(i,j),idx(i+1,j),restLenX);
+    if (j<NY-1) spring(idx(i,j),idx(i,j+1),restLenY);
+    if (i<NX-1&&j<NY-1){ // せん断（対角）でぷるっと感を残しつつ潰れ防止
+      spring(idx(i,j),idx(i+1,j+1),Math.hypot(restLenX,restLenY));
+      spring(idx(i+1,j),idx(i,j+1),Math.hypot(restLenX,restLenY));
+    }
+  }
+  for (let k=0;k<nodes.length;k++){
+    const n=nodes[k];
+    if (n===dragged){ continue; }
+    fx[k]+=K_ANCHOR*(n.rx-n.x); fy[k]+=K_ANCHOR*(n.ry-n.y);
+    n.vx=(n.vx+fx[k]*dt)*Math.exp(-DAMP*dt);
+    n.vy=(n.vy+fy[k]*dt)*Math.exp(-DAMP*dt);
+    n.x+=n.vx*dt; n.y+=n.vy*dt;
+  }
+}
+
+// ---- 入力 ----
+let dragged=null, grab={x:0,y:0};
+function nearest(x,y){
+  let best=null,bd=1e9;
+  for (const n of nodes){ const d=(n.x-x)**2+(n.y-y)**2; if (d<bd){bd=d;best=n;} }
+  return {n:best,d:Math.sqrt(bd)};
+}
+canvas.addEventListener("pointerdown",(e)=>{
+  const {n,d}=nearest(e.clientX,e.clientY);
+  if (d<Math.max(CW,CH)*0.55){ dragged=n; grab.x=e.clientX-n.x; grab.y=e.clientY-n.y;
+    canvas.setPointerCapture?.(e.pointerId); canvas.classList.add("grabbing"); }
+});
+canvas.addEventListener("pointermove",(e)=>{
+  if (dragged){ dragged.x=e.clientX-grab.x; dragged.y=e.clientY-grab.y; dragged.vx=0; dragged.vy=0; }
+});
+const release=()=>{ dragged=null; canvas.classList.remove("grabbing"); };
+canvas.addEventListener("pointerup",release);
+canvas.addEventListener("pointercancel",release);
+
+// ---- 描画補助：UV→変形座標（バイリニア）----
+function mapUV(u,v){
+  const gx=u*(NX-1), gy=v*(NY-1);
+  const i=Math.min(NX-2,Math.floor(gx)), j=Math.min(NY-2,Math.floor(gy));
+  const fx=gx-i, fy=gy-j;
+  const a=nodes[idx(i,j)], b=nodes[idx(i+1,j)], c=nodes[idx(i,j+1)], d=nodes[idx(i+1,j+1)];
+  const x=(a.x*(1-fx)+b.x*fx)*(1-fy)+(c.x*(1-fx)+d.x*fx)*fy;
+  const y=(a.y*(1-fx)+b.y*fx)*(1-fy)+(c.y*(1-fx)+d.y*fx)*fy;
+  return [x,y];
+}
+// 変形カードの外周パス
+function outlinePath(off){
+  const pts=[];
+  const push=(u,v)=>{ const p=mapUV(u,v); pts.push([p[0]+(off?off.x:0), p[1]+(off?off.y:0)]); };
+  for (let i=0;i<NX;i++) push(i/(NX-1),0);
+  for (let j=1;j<NY;j++) push(1,j/(NY-1));
+  for (let i=NX-2;i>=0;i--) push(i/(NX-1),1);
+  for (let j=NY-2;j>=1;j--) push(0,j/(NY-1));
+  ctx.beginPath();
+  for (let k=0;k<pts.length;k++){
+    const a=pts[k], b=pts[(k+1)%pts.length];
+    const mx=(a[0]+b[0])/2, my=(a[1]+b[1])/2;
+    if (k===0) ctx.moveTo(mx,my); else ctx.quadraticCurveTo(a[0],a[1],mx,my);
+  }
+  ctx.closePath();
+}
+function rrect(x,y,w,h,r){ ctx.beginPath(); ctx.roundRect?.(x,y,w,h,r);
+  if (!ctx.roundRect){ ctx.rect(x,y,w,h); } }
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // 変位量（影の追従に使う）
+  let sx=0,sy=0;
+  for (const n of nodes){ sx+=n.x-n.rx; sy+=n.y-n.ry; }
+  sx/=nodes.length; sy/=nodes.length;
+  // 影：歪みに追従してずれ、伸びる
+  const stretch = Math.min(1, Math.hypot(sx,sy)/90);
+  const off = {x: sx*0.35, y: 20+Math.abs(sy)*0.4};
+  ctx.save();
+  try { ctx.filter = `blur(${16+stretch*10}px)`; } catch {}
+  outlinePath(off);
+  ctx.fillStyle = rgba(C.ink, 0.16+stretch*0.06);
+  ctx.fill();
+  ctx.restore();
+
+  // カード面（バイリニアのグラデ塗り）
+  outlinePath(null);
+  const g=ctx.createLinearGradient(ox,oy,ox+CW,oy+CH);
+  g.addColorStop(0,rgba(C.face,1)); g.addColorStop(1,rgba(C.faceLo,1));
+  ctx.fillStyle=g; ctx.fill();
+  ctx.lineWidth=1.2; ctx.strokeStyle=rgba(C.border,0.9); ctx.stroke();
+
+  // クリップして中身を歪んだ面に沿って描く
+  ctx.save(); outlinePath(null); ctx.clip();
+  // アクセントの帯（上部）
+  const bar=[[0.08,0.06],[0.92,0.06],[0.92,0.30],[0.08,0.30]].map(([u,v])=>mapUV(u,v));
+  ctx.beginPath(); ctx.moveTo(bar[0][0],bar[0][1]);
+  for (let k=1;k<bar.length;k++) ctx.lineTo(bar[k][0],bar[k][1]); ctx.closePath();
+  const bg=ctx.createLinearGradient(bar[0][0],bar[0][1],bar[2][0],bar[2][1]);
+  bg.addColorStop(0,rgba(C.acc,1)); bg.addColorStop(1,rgba(C.accHi,1));
+  ctx.fillStyle=bg; ctx.fill();
+  // アバター丸
+  const av=mapUV(0.24,0.185);
+  ctx.beginPath(); ctx.arc(av[0],av[1],CW*0.075,0,Math.PI*2);
+  ctx.fillStyle=rgba(C.face,0.95); ctx.fill();
+  // 本文の行
+  const lineUV=[[0.14,0.46],[0.14,0.58],[0.14,0.70],[0.14,0.82]];
+  const lens=[0.72,0.6,0.66,0.42];
+  for (let r=0;r<lineUV.length;r++){
+    const a=mapUV(lineUV[r][0],lineUV[r][1]);
+    const b=mapUV(lineUV[r][0]+lens[r],lineUV[r][1]);
+    ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]);
+    ctx.lineWidth=CW*0.028; ctx.lineCap="round";
+    ctx.strokeStyle=rgba(r===0?C.ink:C.muted, r===0?0.85:0.55); ctx.stroke();
+  }
+  ctx.restore();
+
+  // 掴んでいる節点のハイライト
+  if (dragged){ ctx.beginPath(); ctx.arc(dragged.x,dragged.y,7,0,Math.PI*2);
+    ctx.fillStyle=rgba(C.acc,0.9); ctx.fill();
+    ctx.beginPath(); ctx.arc(dragged.x,dragged.y,13,0,Math.PI*2);
+    ctx.strokeStyle=rgba(C.acc,0.4); ctx.lineWidth=2; ctx.stroke(); }
+}
+
+resize();
+let last=performance.now(), acc=0;
+function frame(now){
+  let dt=(now-last)/1000; last=now; if (dt>0.05) dt=0.05;
+  if (reduced){
+    // 常時アニメは止める：ドラッグ由来の変位だけ即時反映
+    if (dragged){ acc+=dt; while(acc>=1/120){ step(1/120); acc-=1/120; } }
+    else { for (const n of nodes){ n.x=n.rx; n.y=n.ry; n.vx=n.vy=0; } }
+  } else {
+    acc+=dt; let s=0; while(acc>=1/120 && s<8){ step(1/120); acc-=1/120; s++; }
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

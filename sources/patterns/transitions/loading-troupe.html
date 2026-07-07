@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ローディング群舞">
+<meta name="pattern-desc" content="ドット・リング・バー・スケルトンなど複数のローダーが共有クロックで同期して踊る。テンポで全員が一斉に変わる。">
+<title>ローディング群舞</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .stage { height: 100dvh; display: flex; flex-direction: column; }
+  header { padding: 58px 24px 4px; text-align: center; }
+  header h1 { font-size: 1.05rem; font-weight: 600; letter-spacing: .06em; }
+  header p { margin-top: 6px; font-size: .78rem; color: var(--color-fg-muted); }
+  .tempo {
+    display: flex; align-items: center; gap: 14px; justify-content: center;
+    padding: 16px 20px 6px;
+    font-size: .78rem; color: var(--color-fg-secondary);
+  }
+  .tempo output { font-variant-numeric: tabular-nums; color: var(--color-fg-primary); min-width: 5.2ch; text-align: right; }
+  .tempo input[type=range] {
+    -webkit-appearance: none; appearance: none; width: min(320px, 52vw); height: 4px;
+    border-radius: 999px; background: var(--color-border-strong); outline: none;
+  }
+  .tempo input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 18px; height: 18px; border-radius: 999px;
+    background: var(--color-accent-default); border: 2px solid var(--color-bg-elevated);
+    box-shadow: 0 2px 6px rgba(40,35,25,.2); cursor: pointer;
+  }
+  .tempo input[type=range]::-moz-range-thumb {
+    width: 18px; height: 18px; border: 2px solid var(--color-bg-elevated); border-radius: 999px;
+    background: var(--color-accent-default); cursor: pointer;
+  }
+  .grid {
+    flex: 1; min-height: 0; overflow: auto;
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    padding: 20px clamp(18px, 5vw, 64px) 42px;
+    align-content: start;
+  }
+  .card {
+    border-radius: 20px; border: 1px solid var(--color-border-default);
+    background: var(--color-bg-elevated);
+    box-shadow: 0 4px 14px rgba(40,35,25,.05);
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 18px 14px 14px;
+  }
+  .card canvas { width: 110px; height: 84px; }
+  .card span { font-size: .72rem; color: var(--color-fg-muted); letter-spacing: .04em; }
+  @media (prefers-reduced-motion: reduce) { .tempo { opacity: .6; } }
+</style>
+</head>
+<body>
+<div class="stage">
+  <header>
+    <h1>ローディング群舞</h1>
+    <p>ひとつのクロックで踊る待ち時間の表情たち。テンポで全員が一斉に変わります。</p>
+  </header>
+  <div class="tempo">
+    <label for="t">テンポ</label>
+    <input id="t" type="range" min="0.4" max="3.0" step="0.05" value="1.2">
+    <output id="tv">1.20 秒</output>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+
+  let C = {};
+  function readColors() {
+    C = {
+      accent: token("--color-accent-default", "#5bbcb1"),
+      accentHover: token("--color-accent-hover", "#46a89d"),
+      track: token("--color-border-strong", "#ddd5c6"),
+      muted: token("--color-fg-muted", "#a79f91"),
+      elevated: token("--color-bg-elevated", "#fffdf9"),
+      secondary: token("--color-bg-secondary", "#f1ece2"),
+      ink: token("--color-fg-primary", "#2c2a26"),
+    };
+  }
+  const TAU = Math.PI * 2;
+  const frac = (x) => x - Math.floor(x);
+  const easeInOut = (t) => t * t * (3 - 2 * t);
+  // 往復（0→1→0）を滑らかに
+  const pingpong = (t) => easeInOut(1 - Math.abs(2 * frac(t) - 1));
+
+  // ---- ローダー描画関数群（共有位相 p:[0,1) を受ける）----
+  const loaders = [
+    { title: "ドット", draw(g, w, h, p) {
+      const r = 7, gap = 22, cx = w / 2, cy = h / 2;
+      for (let i = 0; i < 3; i++) {
+        const ph = frac(p - i * 0.14);
+        const up = pingpong(ph) * 16;
+        g.beginPath();
+        g.arc(cx + (i - 1) * gap, cy + 8 - up, r, 0, TAU);
+        g.fillStyle = C.accent; g.globalAlpha = 0.55 + pingpong(ph) * 0.45;
+        g.fill(); g.globalAlpha = 1;
+      }
+    }},
+    { title: "リング", draw(g, w, h, p) {
+      const cx = w / 2, cy = h / 2, R = 24;
+      g.lineWidth = 6; g.lineCap = "round";
+      g.strokeStyle = C.track; g.globalAlpha = 0.5;
+      g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke(); g.globalAlpha = 1;
+      const a = p * TAU, sweep = Math.PI * 1.4;
+      g.strokeStyle = C.accent;
+      g.beginPath(); g.arc(cx, cy, R, a, a + sweep); g.stroke();
+    }},
+    { title: "バー", draw(g, w, h, p) {
+      const n = 5, bw = 8, gap = 6, base = h - 20;
+      const total = n * bw + (n - 1) * gap, x0 = (w - total) / 2;
+      g.fillStyle = C.accent;
+      for (let i = 0; i < n; i++) {
+        const hh = 10 + pingpong(p - i * 0.1) * 42;
+        const x = x0 + i * (bw + gap);
+        roundRect(g, x, base - hh, bw, hh, 4); g.fill();
+      }
+    }},
+    { title: "パルス", draw(g, w, h, p) {
+      const cx = w / 2, cy = h / 2, maxR = 30;
+      for (let i = 0; i < 3; i++) {
+        const t = frac(p + i / 3);
+        const R = t * maxR;
+        g.beginPath(); g.arc(cx, cy, R, 0, TAU);
+        g.strokeStyle = C.accent; g.lineWidth = 3; g.globalAlpha = (1 - t) * 0.9;
+        g.stroke(); g.globalAlpha = 1;
+      }
+      g.beginPath(); g.arc(cx, cy, 5, 0, TAU); g.fillStyle = C.accentHover; g.fill();
+    }},
+    { title: "オービット", draw(g, w, h, p) {
+      const cx = w / 2, cy = h / 2, R = 22;
+      g.strokeStyle = C.track; g.globalAlpha = 0.4; g.lineWidth = 2;
+      g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke(); g.globalAlpha = 1;
+      for (let i = 0; i < 3; i++) {
+        const a = p * TAU + (i / 3) * TAU;
+        const rr = 4 + pingpong(p - i * 0.12) * 3;
+        g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, rr, 0, TAU);
+        g.fillStyle = i === 0 ? C.accentHover : C.accent; g.fill();
+      }
+    }},
+    { title: "ウェーブ", draw(g, w, h, p) {
+      const n = 7, cy = h / 2, span = 76, x0 = (w - span) / 2;
+      g.fillStyle = C.accent;
+      for (let i = 0; i < n; i++) {
+        const x = x0 + (i / (n - 1)) * span;
+        const y = cy + Math.sin((p - i / n) * TAU) * 16;
+        g.beginPath(); g.arc(x, y, 4.5, 0, TAU); g.fill();
+      }
+    }},
+    { title: "スケルトン", draw(g, w, h, p) {
+      const x = 22, y0 = 24, lw = w - 44;
+      const lines = [[lw, 10], [lw * 0.7, 10], [lw * 0.85, 10]];
+      const sweep = frac(p); // ハイライト位置
+      let y = y0;
+      for (const [len, hh] of lines) {
+        g.fillStyle = C.secondary; roundRect(g, x, y, len, hh, 5); g.fill();
+        // 移動するハイライト
+        const hx = x - 30 + sweep * (len + 60);
+        const grad = g.createLinearGradient(hx - 24, 0, hx + 24, 0);
+        grad.addColorStop(0, "rgba(255,255,255,0)");
+        grad.addColorStop(0.5, hexToRgba(C.elevated, 0.85));
+        grad.addColorStop(1, "rgba(255,255,255,0)");
+        g.save(); roundRect(g, x, y, len, hh, 5); g.clip();
+        g.fillStyle = grad; g.fillRect(x, y, len, hh); g.restore();
+        y += hh + 12;
+      }
+    }},
+    { title: "ブリーズ", draw(g, w, h, p) {
+      const cx = w / 2, cy = h / 2;
+      const s = 16 + pingpong(p) * 10;
+      const rot = p * TAU * 0.5;
+      g.save(); g.translate(cx, cy); g.rotate(rot);
+      g.fillStyle = C.accent; g.globalAlpha = 0.9;
+      roundRect(g, -s, -s, s * 2, s * 2, 8 + pingpong(p) * 8); g.fill();
+      g.restore(); g.globalAlpha = 1;
+    }},
+  ];
+
+  function roundRect(g, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    g.beginPath();
+    g.moveTo(x + r, y);
+    g.arcTo(x + w, y, x + w, y + h, r);
+    g.arcTo(x + w, y + h, x, y + h, r);
+    g.arcTo(x, y + h, x, y, r);
+    g.arcTo(x, y, x + w, y, r);
+    g.closePath();
+  }
+  function hexToRgba(hex, a) {
+    let h = hex.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+
+  // ---- カード生成 ----
+  const grid = document.getElementById("grid");
+  const insts = [];
+  for (const L of loaders) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const cv = document.createElement("canvas");
+    const label = document.createElement("span");
+    label.textContent = L.title;
+    card.append(cv, label);
+    grid.appendChild(card);
+    insts.push({ cv, ctx: cv.getContext("2d"), draw: L.draw, w: 0, h: 0 });
+  }
+
+  function sizeCanvases() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    for (const it of insts) {
+      const rect = it.cv.getBoundingClientRect();
+      it.w = rect.width; it.h = rect.height;
+      it.cv.width = Math.round(rect.width * dpr);
+      it.cv.height = Math.round(rect.height * dpr);
+      it.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+
+  // ---- 共有クロック ----
+  const slider = document.getElementById("t");
+  const readout = document.getElementById("tv");
+  let period = parseFloat(slider.value);   // 1 拍の秒数
+  slider.addEventListener("input", () => {
+    period = parseFloat(slider.value);
+    readout.textContent = period.toFixed(2) + " 秒";
+    if (rm.matches) renderAll(); // 静止時もつまみで見た目更新
+  });
+  readout.textContent = period.toFixed(2) + " 秒";
+
+  let phase = 0;             // 全ローダー共有の位相 [0,1)
+  function renderAll() {
+    for (const it of insts) {
+      it.ctx.clearRect(0, 0, it.w, it.h);
+      it.draw(it.ctx, it.w, it.h, phase);
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    // 位相を積分して進める（テンポ変更でも飛ばずに同期を保つ）
+    phase = frac(phase + dt / period);
+    renderAll();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(() => { readColors(); renderAll(); }).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", () => { sizeCanvases(); renderAll(); });
+
+  readColors();
+  requestAnimationFrame(() => {
+    sizeCanvases();
+    if (rm.matches) { phase = 0.2; renderAll(); }
+    else requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+  });
+})();
+</script>
+</body>
+</html>

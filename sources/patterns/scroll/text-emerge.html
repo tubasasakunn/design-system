@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="浮かびあがる文">
+<meta name="pattern-desc" content="スクロール量に応じて文章が語単位で下からにじみ浮かびあがり、読み終えた語は静かに定着する。">
+<title>浮かびあがる文</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .stage {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 46vh 8vw 60vh;
+  }
+  .para { margin: 0 0 2.1em; }
+  .lead .word { font-size: clamp(1.7rem, 4.6vw, 2.9rem); font-weight: 250; letter-spacing: .01em; }
+  .body .word { font-size: clamp(1.15rem, 2.7vw, 1.6rem); }
+  .word {
+    display: inline-block;
+    line-height: 1.9;
+    letter-spacing: .015em;
+    white-space: pre;
+    will-change: transform, opacity, filter;
+  }
+  .word.settled { color: var(--color-fg-primary); }
+  .word.accent { color: var(--color-accent-fg); font-weight: 500; }
+  /* 読み進みガイド（画面中央のかすかな覚醒ライン） */
+  .reveal-line {
+    position: fixed; left: 0; right: 0; top: 50%;
+    height: 1px; pointer-events: none; z-index: 5;
+    background: linear-gradient(90deg, transparent,
+      color-mix(in srgb, var(--color-accent-default) 42%, transparent) 20%,
+      color-mix(in srgb, var(--color-accent-default) 42%, transparent) 80%, transparent);
+    opacity: .55;
+  }
+  .reveal-line::before {
+    content: "いま読んでいるところ";
+    position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+    font-size: .62rem; letter-spacing: .32em; color: var(--color-fg-muted);
+    white-space: nowrap;
+  }
+  .progress {
+    position: fixed; right: 22px; top: 50%; transform: translateY(-50%);
+    width: 3px; height: 30vh; border-radius: 3px; z-index: 5;
+    background: var(--color-border-default); pointer-events: none; overflow: hidden;
+  }
+  .progress i { position: absolute; left: 0; top: 0; width: 100%; border-radius: 3px; background: var(--color-accent-default); height: 0; }
+  .hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    font-size: .74rem; letter-spacing: .18em; color: var(--color-fg-muted);
+    padding: 8px 16px; border-radius: 999px; z-index: 5; pointer-events: none;
+    background: color-mix(in srgb, var(--color-bg-elevated) 76%, transparent);
+    border: 1px solid var(--color-border-default); backdrop-filter: blur(8px);
+    transition: opacity .5s;
+  }
+</style>
+</head>
+<body>
+<div class="reveal-line" aria-hidden="true"></div>
+<div class="progress"><i id="pfill"></i></div>
+<div class="hint" id="hint">↓ ゆっくりスクロール</div>
+
+<main class="stage" id="stage">
+  <p class="para lead" data-text="静かな朝、言葉は まだ 眠っている。"></p>
+  <p class="para body" data-text="ひとつ、また ひとつ、スクロールの分だけ 文字が 下から にじみ、輪郭を 取りもどしていく。"></p>
+  <p class="para body" data-text="急いでは いけない。読み進める 速さと 現れる 速さは、そっと 手を つないでいる。"></p>
+  <p class="para body" data-text="一度 読み終えた 語は、もう 揺れない。静かに その場所へ 定着し、あなたの あとに 続く 言葉を 待つ。"></p>
+  <p class="para lead" data-text="やがて 最後の 一語が 浮かびあがり、文章は はじめて ひとつの 呼吸に なる。"></p>
+</main>
+
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  // やわらかいイージング（現れ切る手前でゆるむ）
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+
+  // data-text を語に割り、アクセント語（鉤括弧的な要点）を差し色にする
+  const ACCENT = new Set(["言葉は", "文字が", "速さと", "速さは", "定着し", "呼吸に"]);
+  const words = [];
+  for (const p of document.querySelectorAll(".para")) {
+    const parts = p.dataset.text.split(/(\s+)/); // 空白も残して自然な字送りに
+    for (const tok of parts) {
+      if (tok === "") continue;
+      if (/^\s+$/.test(tok)) { p.appendChild(document.createTextNode(tok)); continue; }
+      const span = document.createElement("span");
+      span.className = "word" + (ACCENT.has(tok) ? " accent" : "");
+      span.textContent = tok;
+      p.appendChild(span);
+      words.push(span);
+    }
+  }
+
+  const pfill = document.getElementById("pfill");
+  const hint = document.getElementById("hint");
+
+  // 各語の現在の見た目状態（フレーム間で緩やかに追従させる）
+  const state = words.map(() => ({ v: 0 }));
+
+  let vh = innerHeight;
+  addEventListener("resize", () => { vh = innerHeight; }, { passive: true });
+
+  // 語ごとの目標「現れ度」。覚醒ライン(画面中央)より上に来た語は 1 に張り付く＝定着
+  function targetFor(rectMid) {
+    const line = vh * 0.5;
+    // ライン下側 band 分の助走で 0→1、ラインを越えたら 1 のまま
+    const band = vh * 0.32;
+    return clamp((line + band - rectMid) / band, 0, 1);
+  }
+
+  let last = performance.now();
+  let scrolled = false;
+  addEventListener("scroll", () => {
+    if (!scrolled) { scrolled = true; hint.style.opacity = "0"; }
+  }, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    // フレームレート非依存の指数追従（reduced-motion では即時反映）
+    const k = rm.matches ? 1 : (1 - Math.exp(-dt * 9));
+
+    for (let i = 0; i < words.length; i++) {
+      const r = words[i].getBoundingClientRect();
+      const mid = r.top + r.height * 0.5;
+      const tgt = targetFor(mid);
+      const s = state[i];
+      // 定着（1到達）は戻さない：一度読んだ語は揺れない
+      s.v += (Math.max(tgt, s.v) - s.v) * k;
+      const e = ease(s.v);
+      const st = words[i].style;
+      st.opacity = (0.05 + e * 0.95).toFixed(3);
+      st.transform = "translateY(" + ((1 - e) * 26).toFixed(2) + "px)";
+      st.filter = e > 0.985 ? "none" : "blur(" + ((1 - e) * 5).toFixed(2) + "px)";
+      if (e > 0.985 && !words[i].classList.contains("settled")) words[i].classList.add("settled");
+    }
+
+    const max = document.documentElement.scrollHeight - vh;
+    pfill.style.height = (max > 0 ? clamp(scrollY / max, 0, 1) * 100 : 0).toFixed(1) + "%";
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // テーマ/外観変化は CSS 変数で自動追従（色の再取得は不要）。監視のみ設置。
+  new MutationObserver(() => {}).observe(document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+})();
+</script>
+</body>
+</html>

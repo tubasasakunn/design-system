@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="オーロラの帳">
+<meta name="pattern-desc" content="ノイズで揺らぐ光のカーテンが夜空にかかり、ゆっくり形を変える。星がまたたく。">
+<title>オーロラの帳</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary);
+  }
+  #sky { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap; text-align: center;
+  }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<div class="hint">夜空にかかる光のカーテン ─ ポインタを動かすと風がそよぐ</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("sky");
+const ctx = canvas.getContext("2d");
+
+/* ---- テーマトークン ---- */
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const lum = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+
+const C = {};
+const refresh = () => {
+  const bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  const bg2 = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  const ink = hexRgb(token("--color-accent-fg", "#07312d"));      // 深いティール系のインク
+  const dark = lum(bg) < 0.4;                                     // 既に暗い外観か
+  // 夜空: オーロラが映えるよう bg を深いインクへ寄せて夜にする
+  C.skyTop = dark ? bg2 : mix(bg2, ink, 0.9);
+  C.skyBot = dark ? bg : mix(bg, ink, 0.82);
+  C.star = mix(C.skyTop, [255, 255, 255], 0.9);
+  // カーテンの三色(パステル)。淡い外観でも screen で沈まないよう軽く持ち上げる
+  C.bands = [
+    hexRgb("#5bbcb1"), // teal
+    hexRgb("#a9dcc0"), // mint
+    hexRgb("#bcb2e8"), // lavender
+  ];
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+/* ---- 値ノイズ + fbm ---- */
+const perm = new Uint8Array(512);
+(() => {
+  const p = [...Array(256).keys()];
+  for (let i = 255; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [p[i], p[j]] = [p[j], p[i]]; }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+})();
+const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+const lerp = (a, b, t) => a + (b - a) * t;
+const vnoise = (x, y) => {
+  const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+  const xf = x - Math.floor(x), yf = y - Math.floor(y);
+  const u = fade(xf), v = fade(yf);
+  const N = (h) => h / 255 * 2 - 1;
+  const aa = perm[perm[X] + Y], ba = perm[perm[X + 1] + Y];
+  const ab = perm[perm[X] + Y + 1], bb = perm[perm[X + 1] + Y + 1];
+  return lerp(lerp(N(aa), N(ba), u), lerp(N(ab), N(bb), u), v);
+};
+const fbm = (x, y) => {
+  let s = 0, a = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += a * vnoise(x * f, y * f); f *= 2; a *= 0.5; }
+  return s;
+};
+
+/* ---- キャンバス(オーロラは低解像オフスクリーンで柔らかく) ---- */
+const OFF = document.createElement("canvas");
+const octx = OFF.getContext("2d");
+const SCALE = 0.34;
+let W = 0, H = 0, OW = 0, OH = 0, dpr = 1, stars = [];
+const resize = () => {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  OW = Math.max(2, Math.round(W * SCALE)); OH = Math.max(2, Math.round(H * SCALE));
+  OFF.width = OW; OFF.height = OH;
+  const n = Math.round((W * H) / 7000);
+  stars = Array.from({ length: n }, () => ({
+    x: Math.random() * W, y: Math.random() * H * 0.82,
+    r: Math.random() * 1.1 + 0.3, ph: Math.random() * Math.PI * 2,
+    sp: 0.6 + Math.random() * 1.6,
+  }));
+};
+window.addEventListener("resize", resize);
+resize();
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+/* ---- 風(ポインタ) ---- */
+let windTarget = 0, wind = 0;
+window.addEventListener("pointermove", (e) => {
+  windTarget = (e.clientX / W - 0.5) * 2; // -1..1
+}, { passive: true });
+
+/* ---- 帯の設定 ---- */
+const BANDS = [
+  { base: 0.34, amp: 0.10, k1: 3.1, spd: 0.055, h: 0.30, seed: 0, ci: 0 },
+  { base: 0.46, amp: 0.13, k1: 2.3, spd: 0.070, h: 0.36, seed: 40, ci: 1 },
+  { base: 0.58, amp: 0.09, k1: 4.0, spd: 0.045, h: 0.24, seed: 80, ci: 2 },
+];
+
+/* ---- 描画 ---- */
+let t = 0, last = performance.now();
+function drawAurora() {
+  octx.clearRect(0, 0, OW, OH);
+  octx.globalCompositeOperation = "lighter";
+  const step = 2;
+  for (const b of BANDS) {
+    const col = C.bands[b.ci];
+    const drift = wind * OW * 0.06;
+    for (let x = 0; x <= OW; x += step) {
+      const wx = x / OW;
+      const centerY = OH * b.base
+        + Math.sin(wx * b.k1 + t * b.spd + b.seed) * OH * b.amp
+        + fbm(wx * 2.2 + b.seed, t * 0.12) * OH * 0.12
+        + wind * OH * 0.03;
+      const half = OH * b.h * (0.45 + 0.55 * Math.abs(fbm(wx * 3 + b.seed, t * 0.1 + 9)));
+      // 縦のレイ(光条)のきらめき
+      const inten = 0.30 + 0.70 * Math.max(0, fbm(wx * 9 + b.seed + drift * 0.01, t * b.spd * 2.4));
+      const top = centerY - half, bot = centerY + half;
+      const g = octx.createLinearGradient(0, top, 0, bot);
+      g.addColorStop(0, rgba(col, 0));
+      g.addColorStop(0.5, rgba(col, 0.55 * inten));
+      g.addColorStop(1, rgba(col, 0));
+      octx.fillStyle = g;
+      octx.fillRect(x - 1 + drift, top, step + 2, half * 2);
+    }
+  }
+  octx.globalCompositeOperation = "source-over";
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (!reduced) t += dt;
+  wind += (windTarget - wind) * Math.min(1, dt * 2.2);
+  windTarget *= 0.985;
+
+  // 空
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, rgba(C.skyTop, 1));
+  sky.addColorStop(1, rgba(C.skyBot, 1));
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // 星
+  ctx.globalCompositeOperation = "lighter";
+  for (const s of stars) {
+    const tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * s.sp + s.ph));
+    ctx.beginPath();
+    ctx.fillStyle = rgba(C.star, tw * 0.9);
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // オーロラ
+  drawAurora();
+  ctx.imageSmoothingEnabled = true;
+  ctx.globalAlpha = 0.92;
+  ctx.drawImage(OFF, 0, 0, OW, OH, 0, 0, W, H);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+
+  // 地平の淡いもや
+  const haze = ctx.createLinearGradient(0, H * 0.72, 0, H);
+  haze.addColorStop(0, rgba(C.bands[0], 0));
+  haze.addColorStop(1, rgba(C.bands[0], 0.06));
+  ctx.fillStyle = haze;
+  ctx.fillRect(0, H * 0.72, W, H * 0.28);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

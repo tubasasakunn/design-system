@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="かたちのモーフ">
+<meta name="pattern-desc" content="同一頂点数の有機的な閉曲線を自前で補間し、滑らかに姿を変えつづける SVG のヒーロー背景。">
+<title>かたちのモーフ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+  }
+  .hero { position: fixed; inset: 0; display: grid; place-items: center; }
+  svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .copy {
+    position: relative; z-index: 2; text-align: center; padding: 24px;
+    max-width: 640px; mix-blend-mode: normal;
+  }
+  .copy .eyebrow {
+    font-size: .74rem; letter-spacing: .32em; text-transform: uppercase;
+    color: var(--color-fg-muted);
+  }
+  .copy h1 {
+    margin-top: 18px; font-size: clamp(2.1rem, 7vw, 4.2rem); font-weight: 650;
+    line-height: 1.16; letter-spacing: .01em; color: var(--color-fg-primary);
+  }
+  .copy p {
+    margin-top: 20px; font-size: clamp(.9rem, 2.4vw, 1.05rem); line-height: 1.85;
+    color: var(--color-fg-secondary);
+  }
+</style>
+</head>
+<body>
+<div class="hero">
+  <svg id="svg" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <defs>
+      <radialGradient id="g1" cx="38%" cy="34%" r="72%">
+        <stop id="g1a" offset="0%"/>
+        <stop id="g1b" offset="100%"/>
+      </radialGradient>
+      <radialGradient id="g2" cx="64%" cy="66%" r="70%">
+        <stop id="g2a" offset="0%"/>
+        <stop id="g2b" offset="100%"/>
+      </radialGradient>
+    </defs>
+    <path id="blobB" fill="url(#g2)" opacity="0.55"/>
+    <path id="blobA" fill="url(#g1)" opacity="0.9"/>
+  </svg>
+  <div class="copy">
+    <div class="eyebrow">design system</div>
+    <h1>静かに、かたちを変える</h1>
+    <p>ひとつの正解に決めない。うつろう輪郭のなかから、その日の気分にあう好みを選ぶための余白。</p>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+
+  const svg = document.getElementById("svg");
+  const pathA = document.getElementById("blobA");
+  const pathB = document.getElementById("blobB");
+  const stops = {
+    g1a: document.getElementById("g1a"), g1b: document.getElementById("g1b"),
+    g2a: document.getElementById("g2a"), g2b: document.getElementById("g2b"),
+  };
+
+  // ---- 色 ----
+  function applyColors() {
+    const accent = token("--color-accent-default", "#5bbcb1");
+    const elevated = token("--color-bg-elevated", "#fffdf9");
+    const secondary = token("--color-bg-secondary", "#f1ece2");
+    const deep = token("--color-accent-fg", "#07312d");
+    const mixTeal = "#9fc8ea";
+    stops.g1a.setAttribute("stop-color", accent);
+    stops.g1b.setAttribute("stop-color", secondary);
+    stops.g2a.setAttribute("stop-color", mixTeal);
+    stops.g2b.setAttribute("stop-color", elevated);
+    // deep はほぼ未使用だが将来の陰影用に読み込みだけ保持
+    void deep;
+  }
+
+  // ---- 有機的な閉曲線（同一頂点数）を生成 ----
+  const N = 8;              // 頂点数（全キーフレーム共通）
+  const CX = 500, CY = 500;
+  function makeBlob(baseR, jitter, seed) {
+    // 各頂点の半径を疑似ランダムに散らす（seed で決定的）
+    const r = [];
+    let s = seed;
+    const rand = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+    for (let i = 0; i < N; i++) r.push(baseR * (1 + (rand() * 2 - 1) * jitter));
+    return r;
+  }
+  // 半径配列 → 頂点座標配列（回転位相 phase を加える）
+  function radiiToPoints(r, phase, sx, sy) {
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const a = phase + (i / N) * Math.PI * 2;
+      pts.push([CX + Math.cos(a) * r[i] * sx, CY + Math.sin(a) * r[i] * sy]);
+    }
+    return pts;
+  }
+  // 閉じた点列を Catmull-Rom → 3次ベジェで滑らかな 'd' に
+  function pointsToPath(pts) {
+    const n = pts.length;
+    const k = 1 / 6;
+    let d = `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)} `;
+    for (let i = 0; i < n; i++) {
+      const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+      const c1x = p1[0] + (p2[0] - p0[0]) * k, c1y = p1[1] + (p2[1] - p0[1]) * k;
+      const c2x = p2[0] - (p3[0] - p1[0]) * k, c2y = p2[1] - (p3[1] - p1[1]) * k;
+      d += `C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2[0].toFixed(2)} ${p2[1].toFixed(2)} `;
+    }
+    return d + "Z";
+  }
+
+  // キーフレーム（半径配列）— A/B それぞれ独立に巡回
+  function makeSet(count, baseR, jitter, seed0) {
+    const arr = [];
+    for (let i = 0; i < count; i++) arr.push(makeBlob(baseR, jitter, seed0 + i * 137));
+    return arr;
+  }
+  const setA = makeSet(4, 360, 0.28, 11);
+  const setB = makeSet(4, 430, 0.22, 77);
+
+  const lerpArr = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+  // なめらかな ease-in-out
+  const smooth = (t) => t * t * (3 - 2 * t);
+
+  // 各ブロブの巡回状態
+  function makeMover(set, period, phaseSpeed, aspect) {
+    return { set, i: 0, t: 0, period, phaseSpeed, phase: Math.random() * Math.PI * 2, aspect };
+  }
+  const moverA = makeMover(setA, 3.6, 0.05, [1.05, 0.95]);
+  const moverB = makeMover(setB, 4.8, -0.035, [0.95, 1.08]);
+
+  function updateMover(m, dt, path) {
+    m.t += dt / m.period;
+    while (m.t >= 1) { m.t -= 1; m.i = (m.i + 1) % m.set.length; }
+    m.phase += dt * m.phaseSpeed;
+    const from = m.set[m.i];
+    const to = m.set[(m.i + 1) % m.set.length];
+    const r = lerpArr(from, to, smooth(m.t));
+    const pts = radiiToPoints(r, m.phase, m.aspect[0], m.aspect[1]);
+    path.setAttribute("d", pointsToPath(pts));
+  }
+
+  function renderStatic() {
+    updateMover(moverA, 0, pathA);
+    updateMover(moverB, 0, pathB);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    updateMover(moverA, dt, pathA);
+    updateMover(moverB, dt, pathB);
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(applyColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+
+  applyColors();
+  if (rm.matches) {
+    renderStatic();
+  } else {
+    requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+  }
+})();
+</script>
+</body>
+</html>

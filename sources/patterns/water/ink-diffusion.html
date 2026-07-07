@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="墨の滲み">
+<meta name="pattern-desc" content="繊維ノイズで拡散係数を揺らした反応拡散により、墨が和紙へ不規則に滲んで淡く定着する。">
+<title>墨の滲み</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  #flush {
+    position: fixed; right: 24px; bottom: 24px;
+    padding: .6rem 1.2rem; border-radius: 999px;
+    font: inherit; font-size: .8rem; cursor: pointer;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    transition: border-color .25s ease, color .25s ease;
+  }
+  #flush:hover { border-color: var(--color-border-strong); color: var(--color-fg-primary); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>墨の滲み</h1>
+  <p>クリックした場所に墨が落ち、紙の繊維に沿って滲みます。時間とともに乾き、淡く定着します。</p>
+</div>
+<button id="flush" type="button">洗い流す</button>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+
+  let paper, ink;
+  function readColors() {
+    paper = hex(token("--color-bg-primary", "#faf7f1"));
+    ink = hex(token("--color-fg-primary", "#2c2a26")); // 前景色 = 墨（ダークでは淡墨に反転）
+  }
+
+  // ---- 値ノイズ（紙の繊維場に使用）----
+  function hash2(x, y) {
+    let n = (x | 0) * 374761393 + (y | 0) * 668265263;
+    n = (n ^ (n >>> 13)) | 0;
+    n = Math.imul(n, 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+  }
+  function vnoise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+    const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  }
+  function fbm(x, y) {
+    return vnoise(x, y) * 0.55 + vnoise(x * 2.13, y * 2.13) * 0.28 + vnoise(x * 4.31, y * 4.31) * 0.17;
+  }
+
+  // ---- 拡散シミュレーション ----
+  const CS = 3;                 // 1 セル = 3 css px
+  let W = 0, H = 0, gw = 0, gh = 0;
+  let wet = new Float32Array(0);    // 濡れた墨: 拡散・蒸発する
+  let dry = new Float32Array(0);    // 定着した墨: wet から沈着し薄く残る
+  let tmp = new Float32Array(0);
+  let fiber = new Float32Array(0);  // 紙の繊維（拡散係数の揺らぎ）
+  let off, octx, img, flushing = false;
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    gw = Math.ceil(W / CS) + 1;
+    gh = Math.ceil(H / CS) + 1;
+    wet = new Float32Array(gw * gh);
+    dry = new Float32Array(gw * gh);
+    tmp = new Float32Array(gw * gh);
+    fiber = new Float32Array(gw * gh);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        // 0.45〜1.5 の繊維係数。滲みの速さが場所によって揺らぐ（拡散の安定条件内）
+        fiber[y * gw + x] = 0.45 + 1.05 * fbm(x * 0.22, y * 0.22);
+      }
+    }
+    off = document.createElement("canvas");
+    off.width = gw; off.height = gh;
+    octx = off.getContext("2d");
+    img = octx.createImageData(gw, gh);
+    const d = img.data;
+    for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    activity = 1;
+  }
+
+  function step() {
+    // 拡散（繊維で係数を変調 → 滲みの前線が不規則になる）
+    for (let y = 1; y < gh - 1; y++) {
+      let i = y * gw + 1;
+      for (let x = 1; x < gw - 1; x++, i++) {
+        const w = wet[i];
+        const lap = wet[i - 1] + wet[i + 1] + wet[i - gw] + wet[i + gw] - 4 * w;
+        tmp[i] = w + lap * 0.16 * fiber[i];
+      }
+    }
+    const swap = wet; wet = tmp; tmp = swap;
+    // 沈着と乾燥: wet の一部が dry に移り、残りは薄まっていく
+    const flushMul = flushing ? 0.90 : 1;
+    for (let i = 0; i < wet.length; i++) {
+      const w = wet[i];
+      if (w > 0.0004) {
+        const sink = w * 0.016 * fiber[i];
+        dry[i] += sink * 0.5;                 // 半分だけ残る → 乾くと淡い
+        wet[i] = (w - sink) * 0.9965 * flushMul;
+      } else {
+        wet[i] = 0;
+      }
+      if (flushing) dry[i] *= 0.90;
+    }
+    if (dry[(gh >> 1) * gw + (gw >> 1)] < 0.001 && flushing) {
+      let total = 0;
+      for (let i = 0; i < dry.length; i += 97) total += dry[i] + wet[i];
+      if (total < 0.01) flushing = false;
+    }
+  }
+
+  // ---- 墨を落とす（縁を角度ノイズで不規則に）----
+  let seed = 0;
+  function deposit(pxx, pyy, radius, strength) {
+    seed += 13.7;
+    const cx = pxx / CS, cy = pyy / CS;
+    const R = radius / CS;
+    const x0 = Math.max(1, Math.floor(cx - R * 1.5)), x1 = Math.min(gw - 2, Math.ceil(cx + R * 1.5));
+    const y0 = Math.max(1, Math.floor(cy - R * 1.5)), y1 = Math.min(gh - 2, Math.ceil(cy + R * 1.5));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dy = y - cy;
+        const dist = Math.hypot(dx, dy);
+        // その方向のノイズで半径を伸縮 → 縁がガタつく
+        const rr = R * (0.55 + 0.9 * fbm(x * 0.3 + seed, y * 0.3 - seed));
+        if (dist > rr) continue;
+        const fall = 1 - dist / rr;
+        wet[y * gw + x] += strength * fall * fall * (0.5 + fiber[y * gw + x] * 0.5);
+      }
+    }
+    activity = 1;
+  }
+
+  // ---- 描画 ----
+  function render() {
+    const d = img.data;
+    const pr = paper[0], pg = paper[1], pb = paper[2];
+    const ir = ink[0], ig = ink[1], ib = ink[2];
+    for (let i = 0, p = 0; i < wet.length; i++, p += 4) {
+      // 紙のわずかな繊維むら
+      const tex = 1 + (fiber[i] - 1) * 0.045;
+      const density = wet[i] * 2.9 + dry[i] * 1.15;
+      const a = density > 0.0005 ? (1 - Math.exp(-density)) * 0.94 : 0;
+      d[p]     = pr * tex + (ir - pr * tex) * a;
+      d[p + 1] = pg * tex + (ig - pg * tex) * a;
+      d[p + 2] = pb * tex + (ib - pb * tex) * a;
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(off, 0, 0, gw, gh, 0, 0, gw * CS, gh * CS);
+  }
+
+  // ---- 入力 ----
+  let pressed = false, lastX = 0, lastY = 0;
+  canvas.addEventListener("pointerdown", (e) => {
+    pressed = true;
+    canvas.setPointerCapture(e.pointerId);
+    deposit(e.clientX, e.clientY, 26 + Math.random() * 18, 1.5);
+    lastX = e.clientX; lastY = e.clientY;
+    if (rm.matches) settleInstant();
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!pressed) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 6) return;
+    const n = Math.max(1, Math.floor(dist / 7));
+    for (let k = 1; k <= n; k++) {
+      deposit(lastX + dx * k / n, lastY + dy * k / n, 10 + Math.random() * 8, 0.7);
+    }
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  const up = () => { pressed = false; if (rm.matches) settleInstant(); };
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
+  document.getElementById("flush").addEventListener("click", () => {
+    flushing = true; activity = 1;
+    if (rm.matches) settleInstant();
+  });
+
+  // reduce 時: 滲みのアニメーションを見せず、一気に定着した結果だけ描く
+  function settleInstant() {
+    for (let k = 0; k < 260; k++) step();
+    render();
+  }
+
+  // ---- メインループ（墨が動いている間だけ計算）----
+  let last = performance.now(), acc = 0, activity = 1;
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;
+    if (!rm.matches && activity > 0) {
+      acc += dt;
+      const STEP = 1 / 60;
+      let n = 0;
+      while (acc >= STEP && n < 3) { step(); acc -= STEP; n++; }
+      if (acc >= STEP) acc = 0;
+      // 全体が乾いたら休止（静かな省電力）
+      let total = 0;
+      for (let i = 0; i < wet.length; i += 61) total += wet[i];
+      if (total < 0.003 && !flushing) activity = 0;
+      render();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(() => { readColors(); activity = 1; if (rm.matches) render(); })
+    .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  // 最初のひと滴（reduce では即定着で見せる）
+  deposit(W * 0.5, H * 0.42, 52, 1.5);
+  deposit(W * 0.5 + 70, H * 0.42 + 46, 22, 0.9);
+  if (rm.matches) settleInstant(); else render();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

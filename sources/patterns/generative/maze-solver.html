@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="迷路の生成と探索">
+<meta name="pattern-desc" content="再帰的バックトラッカーで迷路を彫り、幅優先探索が水のように広がってゴールへ至り、最短経路が光る一連の様子をアニメーションする。">
+<title>迷路の生成と探索</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .panel {
+    position: fixed; left: 24px; bottom: 24px; max-width: 340px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+  }
+  .panel h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .panel p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  .row { margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: .78rem; cursor: pointer;
+    padding: .4rem .8rem; border-radius: 999px;
+    color: var(--color-accent-fg); background: var(--color-accent-default);
+    border: 1px solid transparent; transition: background .2s;
+  }
+  button:hover { background: var(--color-accent-hover); }
+  button.ghost {
+    color: var(--color-fg-secondary); background: transparent;
+    border: 1px solid var(--color-border-default);
+  }
+  .phase { font-size: .72rem; color: var(--color-fg-secondary); letter-spacing: .05em; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+  <h1>迷路の生成と探索</h1>
+  <p>再帰的バックトラッカーで迷路が彫られ、幅優先探索が広がり、最短経路が光ります。</p>
+  <div class="row">
+    <button id="regen">再生成</button>
+    <span class="phase" id="phase">生成中…</span>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const phaseEl = document.getElementById("phase");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let bg, ink, edge, accent, elev, muted;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    ink = hex(token("--color-fg-primary", "#2c2a26"));
+    muted = hex(token("--color-fg-muted", "#a79f91"));
+    edge = hex(token("--color-border-strong", "#ddd5c6"));
+    accent = hex(token("--color-accent-default", "#5bbcb1"));
+  }
+
+  let W = 0, H = 0, cell = 26, cols = 0, rows = 0, ox = 0, oy = 0;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    cell = Math.max(18, Math.min(38, Math.min(W, H) / 20));
+    cols = Math.max(5, Math.floor((W - 48) / cell));
+    rows = Math.max(5, Math.floor((H - 48) / cell));
+    ox = (W - cols * cell) / 2;
+    oy = (H - rows * cell) / 2;
+  }
+
+  // ---- 迷路データ ----
+  let grid;              // 各セル: {N,E,S,W} = 壁が開いているか
+  let start, goal;
+  // 生成状態
+  let genStack, genVisited, genDone;
+  // 探索状態
+  let bfsQueue, bfsHead, bfsVisited, bfsPrev, bfsOrder, bfsDone;
+  // 経路
+  let path, pathHead;
+  let phase = "gen";     // gen -> solve -> path -> done
+  let flash = 0;
+
+  const idx = (x, y) => y * cols + x;
+  const DIRS = [
+    { dx: 0, dy: -1, a: "N", b: "S" },
+    { dx: 1, dy: 0, a: "E", b: "W" },
+    { dx: 0, dy: 1, a: "S", b: "N" },
+    { dx: -1, dy: 0, a: "W", b: "E" },
+  ];
+
+  function reset() {
+    grid = new Array(cols * rows);
+    for (let i = 0; i < grid.length; i++) grid[i] = { N: false, E: false, S: false, W: false };
+    start = { x: 0, y: 0 };
+    goal = { x: cols - 1, y: rows - 1 };
+
+    genVisited = new Uint8Array(cols * rows);
+    genStack = [idx(start.x, start.y)];
+    genVisited[idx(start.x, start.y)] = 1;
+    genDone = false;
+
+    bfsDone = false; path = null;
+    phase = "gen";
+    phaseEl.textContent = "生成中…";
+
+    if (rm.matches) { while (genStep()) {} finishGen(); }
+  }
+
+  // 再帰的バックトラッカーの 1 ステップ
+  function genStep() {
+    if (!genStack.length) { genDone = true; return false; }
+    const cur = genStack[genStack.length - 1];
+    const cx = cur % cols, cy = (cur / cols) | 0;
+    const cand = [];
+    for (const d of DIRS) {
+      const nx = cx + d.dx, ny = cy + d.dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      if (genVisited[idx(nx, ny)]) continue;
+      cand.push({ d, ni: idx(nx, ny) });
+    }
+    if (!cand.length) { genStack.pop(); return true; }
+    const pick = cand[(Math.random() * cand.length) | 0];
+    grid[cur][pick.d.a] = true;
+    grid[pick.ni][pick.d.b] = true;
+    genVisited[pick.ni] = 1;
+    genStack.push(pick.ni);
+    return true;
+  }
+
+  function finishGen() {
+    genDone = true;
+    phase = "solve";
+    phaseEl.textContent = "探索中…";
+    bfsVisited = new Uint8Array(cols * rows);
+    bfsPrev = new Int32Array(cols * rows).fill(-1);
+    bfsOrder = new Float32Array(cols * rows).fill(-1);
+    bfsQueue = [idx(start.x, start.y)];
+    bfsHead = 0;
+    bfsVisited[idx(start.x, start.y)] = 1;
+    bfsOrder[idx(start.x, start.y)] = 0;
+    bfsDone = false;
+    if (rm.matches) { while (bfsStep()) {} finishSolve(); }
+  }
+
+  let bfsCounter = 0;
+  function bfsStep() {
+    if (bfsHead >= bfsQueue.length) { bfsDone = true; return false; }
+    const cur = bfsQueue[bfsHead++];
+    const cx = cur % cols, cy = (cur / cols) | 0;
+    if (cx === goal.x && cy === goal.y) { bfsDone = true; return false; }
+    for (const d of DIRS) {
+      if (!grid[cur][d.a]) continue;               // 壁が閉じている
+      const nx = cx + d.dx, ny = cy + d.dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+      const ni = idx(nx, ny);
+      if (bfsVisited[ni]) continue;
+      bfsVisited[ni] = 1;
+      bfsPrev[ni] = cur;
+      bfsOrder[ni] = ++bfsCounter;
+      bfsQueue.push(ni);
+    }
+    return true;
+  }
+
+  function finishSolve() {
+    bfsDone = true;
+    // 最短経路を復元
+    path = [];
+    let c = idx(goal.x, goal.y);
+    if (bfsVisited[c]) {
+      while (c !== -1) { path.push(c); c = bfsPrev[c]; }
+      path.reverse();
+    }
+    pathHead = 0;
+    phase = "path";
+    phaseEl.textContent = "最短経路";
+    flash = 1;
+    if (rm.matches) { pathHead = path.length; phase = "done"; }
+  }
+
+  // ---- 描画 ----
+  function cellRect(i) {
+    const x = i % cols, y = (i / cols) | 0;
+    return [ox + x * cell, oy + y * cell];
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = rgba(bg, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    // 探索の広がり（等高線状の淡い塗り）
+    if (phase === "solve" || phase === "path" || phase === "done") {
+      const maxOrder = Math.max(1, bfsCounter);
+      for (let i = 0; i < grid.length; i++) {
+        if (bfsOrder[i] < 0) continue;
+        const [px, py] = cellRect(i);
+        const t = bfsOrder[i] / maxOrder;
+        const col = mix(mix(elev, accent, 0.18), mix(bg, accent, 0.5), t);
+        // solve フェーズでは到達順まででクリップ
+        if (phase === "solve" && bfsOrder[i] > bfsCounterShown) continue;
+        ctx.fillStyle = rgba(col, 0.9);
+        ctx.fillRect(px + 1, py + 1, cell - 1, cell - 1);
+      }
+    }
+
+    // 生成中に訪問済みのセルをうっすら
+    if (phase === "gen") {
+      for (let i = 0; i < grid.length; i++) {
+        if (!genVisited[i]) continue;
+        const [px, py] = cellRect(i);
+        ctx.fillStyle = rgba(mix(bg, elev, 0.6), 0.9);
+        ctx.fillRect(px + 1, py + 1, cell - 1, cell - 1);
+      }
+      // 生成ヘッド
+      if (genStack.length) {
+        const [px, py] = cellRect(genStack[genStack.length - 1]);
+        ctx.fillStyle = rgba(accent, 0.85);
+        ctx.fillRect(px + 3, py + 3, cell - 5, cell - 5);
+      }
+    }
+
+    // 壁を引く
+    ctx.strokeStyle = rgba(mix(edge, ink, 0.35), 0.95);
+    ctx.lineWidth = Math.max(1.5, cell * 0.09);
+    ctx.beginPath();
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const c = grid[idx(x, y)];
+        const px = ox + x * cell, py = oy + y * cell;
+        if (!c.N) { ctx.moveTo(px, py); ctx.lineTo(px + cell, py); }
+        if (!c.W) { ctx.moveTo(px, py); ctx.lineTo(px, py + cell); }
+        if (x === cols - 1 && !c.E) { ctx.moveTo(px + cell, py); ctx.lineTo(px + cell, py + cell); }
+        if (y === rows - 1 && !c.S) { ctx.moveTo(px, py + cell); ctx.lineTo(px + cell, py + cell); }
+      }
+    }
+    ctx.stroke();
+
+    // 最短経路の光
+    if (path && path.length) {
+      const shown = Math.min(pathHead, path.length);
+      ctx.strokeStyle = rgba(accent, 0.95);
+      ctx.lineWidth = Math.max(3, cell * 0.28);
+      ctx.shadowColor = rgba(accent, 0.9);
+      ctx.shadowBlur = phase === "done" ? 14 + Math.sin(tGlobal * 3) * 6 : 12;
+      ctx.beginPath();
+      for (let k = 0; k < shown; k++) {
+        const [px, py] = cellRect(path[k]);
+        const cx = px + cell / 2, cy = py + cell / 2;
+        if (k === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // 始点・終点マーカー
+    const drawNode = (nx, ny, col) => {
+      const cx = ox + nx * cell + cell / 2, cy = oy + ny * cell + cell / 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cell * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = rgba(col, 0.95);
+      ctx.fill();
+    };
+    drawNode(start.x, start.y, mix(ink, accent, 0.3));
+    drawNode(goal.x, goal.y, accent);
+
+    // 落雷のようなほのかな明滅（経路確定時）
+    if (flash > 0.001) {
+      ctx.fillStyle = rgba(accent, flash * 0.12);
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  // ---- ループ ----
+  let bfsCounterShown = 0;
+  let tGlobal = 0, last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    tGlobal += dt;
+    if (flash > 0) flash = Math.max(0, flash - dt * 2.2);
+
+    if (!rm.matches) {
+      if (phase === "gen") {
+        const per = Math.max(1, Math.ceil((cols * rows) / 150));
+        for (let k = 0; k < per; k++) if (!genStep()) break;
+        if (genDone) finishGen();
+      } else if (phase === "solve") {
+        const per = Math.max(1, Math.ceil((cols * rows) / 120));
+        for (let k = 0; k < per; k++) { if (!bfsStep()) break; }
+        bfsCounterShown = bfsCounter;
+        if (bfsDone) finishSolve();
+      } else if (phase === "path") {
+        pathHead += Math.max(0.5, (path.length || 1) / 60);
+        if (pathHead >= path.length) { pathHead = path.length; phase = "done"; }
+      }
+    } else {
+      bfsCounterShown = bfsCounter;
+    }
+
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  document.getElementById("regen").addEventListener("click", () => { bfsCounter = 0; reset(); });
+  canvas.addEventListener("pointerdown", () => { if (phase === "done") { bfsCounter = 0; reset(); } });
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", () => { resize(); bfsCounter = 0; reset(); });
+
+  resize(); readColors(); reset();
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

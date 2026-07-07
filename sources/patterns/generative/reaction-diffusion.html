@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="反応拡散">
+<meta name="pattern-desc" content="Gray-Scott 反応拡散方程式を縮小グリッド上で毎フレーム複数回積分し、斑点・縞・珊瑚の模様が育つ様子を描く。筆でタネを撒ける。">
+<title>反応拡散</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; image-rendering: auto; }
+  .panel {
+    position: fixed; left: 24px; bottom: 24px; max-width: 360px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+  }
+  .panel h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .panel p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  .row { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: .76rem; cursor: pointer;
+    padding: .38rem .8rem; border-radius: 999px;
+    color: var(--color-fg-secondary); background: transparent;
+    border: 1px solid var(--color-border-default); transition: all .2s;
+  }
+  button.on { color: var(--color-accent-fg); background: var(--color-accent-default); border-color: transparent; }
+  button.clear { color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+  <h1>反応拡散</h1>
+  <p>Gray-Scott モデル。ドラッグでタネを撒くと模様が育ちます。係数プリセットで表情が変わります。</p>
+  <div class="row" id="presets">
+    <button data-k="spots" class="on">斑点</button>
+    <button data-k="stripes">縞</button>
+    <button data-k="coral">珊瑚</button>
+    <button data-k="clear" class="clear">まっさら</button>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let bg, ink, accent, elev;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    ink = hex(token("--color-fg-primary", "#2c2a26"));
+    accent = hex(token("--color-accent-default", "#5bbcb1"));
+  }
+
+  // Gray-Scott の係数プリセット（供給 f / 除去 k）
+  const PRESETS = {
+    spots: { f: 0.0367, k: 0.0649 },   // 斑点（分裂）
+    stripes: { f: 0.026, k: 0.051 },   // 縞・迷路
+    coral: { f: 0.0545, k: 0.062 },    // 珊瑚（成長）
+  };
+  let params = { ...PRESETS.spots };
+  const Da = 1.0, Db = 0.5, dt = 1.0;
+
+  // ---- グリッド ----
+  let gw = 0, gh = 0;        // 計算グリッド解像度
+  let a, b, a2, b2;          // 濃度場（Float32）
+  let buf, img;              // 表示用オフスクリーン
+  let W = 0, H = 0;
+  const SCALE = 4;           // 表示ピクセル / グリッドセル
+
+  function alloc() {
+    gw = Math.max(60, Math.min(260, Math.round(W / SCALE)));
+    gh = Math.max(40, Math.round(gw * H / W));
+    const n = gw * gh;
+    a = new Float32Array(n); b = new Float32Array(n);
+    a2 = new Float32Array(n); b2 = new Float32Array(n);
+    a.fill(1); b.fill(0);
+    buf = document.createElement("canvas");
+    buf.width = gw; buf.height = gh;
+    img = buf.getContext("2d").createImageData(gw, gh);
+    seedCenter();
+  }
+
+  function seedCenter() {
+    // 中央にいくつかのタネ
+    for (let s = 0; s < 8; s++) {
+      const cx = (0.2 + Math.random() * 0.6) * gw;
+      const cy = (0.2 + Math.random() * 0.6) * gh;
+      brush(cx, cy, 4 + Math.random() * 3);
+    }
+  }
+
+  function brush(cx, cy, r) {
+    const r2 = r * r;
+    for (let y = -r; y <= r; y++) {
+      for (let x = -r; x <= r; x++) {
+        if (x * x + y * y > r2) continue;
+        const gx = ((cx + x) | 0), gy = ((cy + y) | 0);
+        if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
+        b[gy * gw + gx] = 1;
+      }
+    }
+  }
+
+  function resize() {
+    W = innerWidth; H = innerHeight;
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    ctx.imageSmoothingEnabled = true;
+    alloc();
+  }
+
+  // ---- Gray-Scott 積分（1 ステップ）。境界はトーラス状に巻く ----
+  function step() {
+    for (let y = 0; y < gh; y++) {
+      const yu = (y - 1 + gh) % gh, yd = (y + 1) % gh;
+      for (let x = 0; x < gw; x++) {
+        const xl = (x - 1 + gw) % gw, xr = (x + 1) % gw;
+        const i = y * gw + x;
+        const av = a[i], bv = b[i];
+        // 3x3 ラプラシアン（中心 -1、直交 0.2、斜め 0.05）
+        const lapA =
+          a[yu * gw + xl] * 0.05 + a[yu * gw + x] * 0.2 + a[yu * gw + xr] * 0.05 +
+          a[y * gw + xl] * 0.2 + av * -1 + a[y * gw + xr] * 0.2 +
+          a[yd * gw + xl] * 0.05 + a[yd * gw + x] * 0.2 + a[yd * gw + xr] * 0.05;
+        const lapB =
+          b[yu * gw + xl] * 0.05 + b[yu * gw + x] * 0.2 + b[yu * gw + xr] * 0.05 +
+          b[y * gw + xl] * 0.2 + bv * -1 + b[y * gw + xr] * 0.2 +
+          b[yd * gw + xl] * 0.05 + b[yd * gw + x] * 0.2 + b[yd * gw + xr] * 0.05;
+        const abb = av * bv * bv;
+        let na = av + (Da * lapA - abb + params.f * (1 - av)) * dt;
+        let nb = bv + (Db * lapB + abb - (params.k + params.f) * bv) * dt;
+        na = na < 0 ? 0 : na > 1 ? 1 : na;
+        nb = nb < 0 ? 0 : nb > 1 ? 1 : nb;
+        a2[i] = na; b2[i] = nb;
+      }
+    }
+    let t = a; a = a2; a2 = t;
+    t = b; b = b2; b2 = t;
+  }
+
+  // ---- 表示 ----
+  const lut = new Int32Array(256 * 3);
+  function buildLUT() {
+    for (let i = 0; i < 256; i++) {
+      const v = i / 255;
+      // 低: 生成りの地、中: ティール、高: 濃インク
+      let col;
+      if (v < 0.5) col = mix(mix(bg, elev, 0.5), accent, v * 2);
+      else col = mix(accent, ink, (v - 0.5) * 2);
+      lut[i * 3] = col[0]; lut[i * 3 + 1] = col[1]; lut[i * 3 + 2] = col[2];
+    }
+  }
+
+  function render() {
+    const d = img.data;
+    for (let i = 0; i < a.length; i++) {
+      // a-b のコントラストを模様に使う
+      let v = a[i] - b[i];
+      v = v < 0 ? 0 : v > 1 ? 1 : v;
+      const li = (255 - (v * 255 | 0)) * 3;   // 反転して b が濃く見えるように
+      const p = i * 4;
+      d[p] = lut[li]; d[p + 1] = lut[li + 1]; d[p + 2] = lut[li + 2]; d[p + 3] = 255;
+    }
+    buf.getContext("2d").putImageData(img, 0, 0);
+    ctx.drawImage(buf, 0, 0, gw, gh, 0, 0, W, H);
+  }
+
+  // ---- 入力（筆）----
+  let painting = false;
+  function toGrid(e) {
+    return [e.clientX / W * gw, e.clientY / H * gh];
+  }
+  canvas.addEventListener("pointerdown", (e) => {
+    painting = true; const [x, y] = toGrid(e); brush(x, y, 5);
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!painting) return; const [x, y] = toGrid(e); brush(x, y, 5);
+  });
+  addEventListener("pointerup", () => { painting = false; });
+
+  document.querySelectorAll("#presets button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.k;
+      if (key === "clear") { a.fill(1); b.fill(0); return; }
+      params = { ...PRESETS[key] };
+      document.querySelectorAll("#presets button").forEach((x) => x.classList.remove("on"));
+      btn.classList.add("on");
+    });
+  });
+
+  // ---- ループ ----
+  let last = performance.now();
+  function frame(now) {
+    last = now;
+    if (!rm.matches) { for (let s = 0; s < 10; s++) step(); }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(() => { readColors(); buildLUT(); }).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  let rt;
+  addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(resize, 150); });
+
+  resize(); readColors(); buildLUT();
+  if (rm.matches) { for (let s = 0; s < 600; s++) step(); }
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

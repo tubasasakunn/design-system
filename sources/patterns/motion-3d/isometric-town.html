@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="等角の街">
+<meta name="pattern-desc" content="アイソメトリック投影の建物がバネ物理でぽよんとせり上がり、街が組み上がる。ホバーで伸び、再生成で配置が変わる。">
+<title>等角の街</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); color: var(--color-fg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .bar {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .hint {
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); white-space: nowrap;
+  }
+  #regen {
+    padding: .55rem 1.3rem; border-radius: 999px; font-size: .82rem; letter-spacing: .08em;
+    font-family: inherit; cursor: pointer;
+    color: var(--color-accent-fg);
+    background: var(--color-accent-default);
+    border: 1px solid color-mix(in srgb, var(--color-accent-hover) 60%, transparent);
+    transition: transform .18s cubic-bezier(.34,1.56,.64,1), background .18s;
+  }
+  #regen:hover { background: var(--color-accent-hover); transform: translateY(-2px); }
+  #regen:active { transform: translateY(0) scale(.97); }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="bar">
+  <span class="hint">建物に触れると ぽよん</span>
+  <button id="regen" type="button">街を再生成</button>
+</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const reduceMq = matchMedia("(prefers-reduced-motion: reduce)");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const C = {};
+const refreshColors = () => {
+  C.bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.ground = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.border = hexRgb(token("--color-border-default", "#ece6db"));
+  C.dark = (0.299 * C.bg[0] + 0.587 * C.bg[1] + 0.114 * C.bg[2]) / 255 < 0.45;
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス ----
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+resize();
+addEventListener("resize", resize);
+
+// ---- アイソメトリック投影 ----
+const N = 9;                       // グリッド数
+let hw = 36, hh = 18;              // タイル半幅・半高（resize で調整）
+const isoX = (i, j) => (i - j) * hw;
+const isoY = (i, j) => (i + j) * hh;
+const origin = () => ({ ox: W / 2, oy: H / 2 - N * hh + 30 });
+
+// ---- 街の生成 ----
+const PASTEL = ["#f0a8bd", "#f1d189", "#bcb2e8", "#f3a890", "#9fc8ea", "#5bbcb1"];
+const MINT = hexRgb("#a9dcc0");
+let cells = [];
+let seed = 7;
+const rand = () => {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+};
+const generate = () => {
+  cells = [];
+  const cx = (N - 1) / 2;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const road = (i % 3 === 2) || (j % 3 === 2);          // 道路で区画割り
+    const distC = Math.hypot(i - cx, j - cx);
+    let kind = "lot", baseH = 0, col = null;
+    if (!road) {
+      const r = rand();
+      if (r < 0.16) { kind = "park"; baseH = 10 + rand() * 6; }
+      else {
+        kind = "bldg";
+        // 中心ほど高い、外周ほど低い
+        baseH = (26 + rand() * 60) * (1.25 - distC / (cx * 1.5));
+        baseH = Math.max(18, baseH);
+        col = hexRgb(PASTEL[(rand() * PASTEL.length) | 0]);
+      }
+    } else kind = "road";
+    cells.push({
+      i, j, kind, baseH, col,
+      h: 0, v: 0,                    // バネ状態（現在高さ・速度）
+      delay: (i + j) * 0.045 + rand() * 0.12, // 奥から順にせり上がる
+      born: performance.now(),
+      hover: 0, hoverV: 0,           // ホバー伸び率のバネ
+      win: rand(),                   // 窓パターンの種
+    });
+  }
+};
+generate();
+document.getElementById("regen").addEventListener("click", () => {
+  seed = (Math.random() * 0x7fffffff) | 0;
+  generate();
+});
+
+// ---- ポインタ（ホバー判定は手前の建物から silhouette 六角形で当たり判定）----
+const pointer = { x: -1e4, y: -1e4 };
+canvas.addEventListener("pointermove", (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
+canvas.addEventListener("pointerdown", (e) => { pointer.x = e.clientX; pointer.y = e.clientY; });
+canvas.addEventListener("pointerleave", () => { pointer.x = -1e4; pointer.y = -1e4; });
+
+const silhouette = (c, ox, oy) => {
+  // 高さ h の箱の見えている外形（六角形）
+  const h = c.h * (1 + c.hover * 0.28);
+  const Nx = ox + isoX(c.i, c.j),      Ny = oy + isoY(c.i, c.j);
+  const Ex = ox + isoX(c.i + 1, c.j),  Ey = oy + isoY(c.i + 1, c.j);
+  const Sx = ox + isoX(c.i + 1, c.j + 1), Sy = oy + isoY(c.i + 1, c.j + 1);
+  const Wx = ox + isoX(c.i, c.j + 1),  Wy = oy + isoY(c.i, c.j + 1);
+  return [[Nx, Ny - h], [Ex, Ey - h], [Ex, Ey], [Sx, Sy], [Wx, Wy], [Wx, Wy - h]];
+};
+const inPoly = (px, py, poly) => {
+  let ins = false;
+  for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) {
+    const [xa, ya] = poly[a], [xb, yb] = poly[b];
+    if ((ya > py) !== (yb > py) && px < ((xb - xa) * (py - ya)) / (yb - ya) + xa) ins = !ins;
+  }
+  return ins;
+};
+
+// ---- 描画 ----
+const drawBox = (c, ox, oy) => {
+  const h = c.h * (1 + c.hover * 0.28);
+  if (h < 0.5) return;
+  const sq = 1 - c.hover * 0.06; // 伸びた分すこし痩せる（体積保存っぽく）
+  const gi = c.i + (1 - sq) / 2, gj = c.j + (1 - sq) / 2;
+  const P = (i, j, y) => [ox + isoX(i, j), oy + isoY(i, j) - y];
+  const n0 = P(gi, gj, 0), e0 = P(gi + sq, gj, 0), s0 = P(gi + sq, gj + sq, 0), w0 = P(gi, gj + sq, 0);
+  const n1 = P(gi, gj, h), e1 = P(gi + sq, gj, h), s1 = P(gi + sq, gj + sq, h), w1 = P(gi, gj + sq, h);
+  const base = c.kind === "park" ? MINT : c.col;
+  const lift = C.dark ? 0.16 : 0;
+  const top = mix(mix(base, [255, 255, 255], 0.42 + lift), C.bg, 0.05);
+  const left = mix(base, C.dark ? [255, 255, 255] : C.ink, C.dark ? 0.02 : 0.16);  // 西面（やや暗）
+  const right = mix(base, C.ink, C.dark ? 0.18 : 0.34);                            // 南東面（暗）
+  const face = (pts, col) => {
+    ctx.fillStyle = rgba(col, 1);
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+    ctx.closePath(); ctx.fill();
+  };
+  face([w1, s1, s0, w0], left);
+  face([e1, s1, s0, e0], right);
+  face([n1, e1, s1, w1], top);
+  // 窓（右面に点灯をまばらに）
+  if (c.kind === "bldg" && h > 24) {
+    const rows = Math.min(6, (h / 14) | 0);
+    for (let r = 1; r <= rows; r++) {
+      const t = r / (rows + 1);
+      const y1 = s1[1] + (s0[1] - s1[1]) * t;
+      for (let k = 0; k < 2; k++) {
+        const u = 0.28 + k * 0.4;
+        const on = ((c.win * 997 + r * 31 + k * 7) % 1 + 1) % 1 < 0.55;
+        ctx.fillStyle = rgba(on ? mix(hexRgb("#f1d189"), [255, 255, 255], 0.3) : mix(right, C.ink, 0.25), on ? 0.9 : 0.5);
+        ctx.fillRect(e1[0] + (s1[0] - e1[0]) * u - 2, y1 + (e1[1] - s1[1]) * (0.5 - u) - 2.5, 4.5, 5.5);
+      }
+    }
+  }
+  if (c.kind === "park") { // 樹冠
+    const tx = (n1[0] + s1[0]) / 2, ty = (n1[1] + s1[1]) / 2;
+    ctx.fillStyle = rgba(mix(MINT, C.ink, 0.28), 1);
+    ctx.beginPath(); ctx.arc(tx, ty - 6, 8 + c.hover * 3, 0, 6.283); ctx.fill();
+    ctx.fillStyle = rgba(mix(MINT, [255, 255, 255], 0.25), 1);
+    ctx.beginPath(); ctx.arc(tx - 3, ty - 9, 6 + c.hover * 2.5, 0, 6.283); ctx.fill();
+  }
+};
+
+let last = performance.now();
+const frame = (now) => {
+  const dt = Math.min(0.045, (now - last) / 1000); last = now;
+  const reduce = reduceMq.matches;
+  const { ox, oy } = origin();
+  hw = Math.min(38, Math.max(22, Math.min(W, H) / (N * 1.45))); hh = hw / 2;
+
+  // ホバー対象（手前 = i+j 大きい順に探す）
+  let hovered = null;
+  const sorted = [...cells].sort((a, b) => (b.i + b.j) - (a.i + a.j) || (b.j - a.j));
+  for (const c of sorted) {
+    if (c.kind !== "bldg" && c.kind !== "park") continue;
+    if (c.h > 1 && inPoly(pointer.x, pointer.y, silhouette(c, ox, oy))) { hovered = c; break; }
+  }
+
+  // バネ物理: 高さ（せり上がり）とホバー伸び
+  for (const c of cells) {
+    const age = (now - c.born) / 1000;
+    const target = (reduce || age > c.delay) ? c.baseH : 0;
+    if (reduce) { c.h = target; c.v = 0; }
+    else {
+      const k = 90, d = 7.5;                        // 低ダンピングでぽよん
+      c.v += (k * (target - c.h) - d * c.v) * dt;
+      c.h += c.v * dt;
+    }
+    const ht = c === hovered ? 1 : 0;
+    if (reduce) { c.hover = ht * 0.4; c.hoverV = 0; }
+    else {
+      const k2 = 170, d2 = 9;
+      c.hoverV += (k2 * (ht - c.hover) - d2 * c.hoverV) * dt;
+      c.hover += c.hoverV * dt;
+    }
+  }
+
+  ctx.clearRect(0, 0, W, H);
+
+  // 地面（全体の菱形 + 区画）
+  const g0 = [ox + isoX(0, 0), oy + isoY(0, 0)], g1 = [ox + isoX(N, 0), oy + isoY(N, 0)];
+  const g2 = [ox + isoX(N, N), oy + isoY(N, N)], g3 = [ox + isoX(0, N), oy + isoY(0, N)];
+  ctx.fillStyle = rgba(mix(C.ground, C.ink, 0.03), 1);
+  ctx.beginPath(); ctx.moveTo(g0[0], g0[1]); ctx.lineTo(g1[0], g1[1]); ctx.lineTo(g2[0], g2[1]); ctx.lineTo(g3[0], g3[1]); ctx.closePath(); ctx.fill();
+  for (const c of cells) {
+    if (c.kind === "road") continue;
+    ctx.fillStyle = c.kind === "park" ? rgba(mix(MINT, C.ground, 0.55), 1) : rgba(mix(C.ground, C.bg, 0.5), 1);
+    ctx.beginPath();
+    ctx.moveTo(ox + isoX(c.i, c.j), oy + isoY(c.i, c.j));
+    ctx.lineTo(ox + isoX(c.i + 1, c.j), oy + isoY(c.i + 1, c.j));
+    ctx.lineTo(ox + isoX(c.i + 1, c.j + 1), oy + isoY(c.i + 1, c.j + 1));
+    ctx.lineTo(ox + isoX(c.i, c.j + 1), oy + isoY(c.i, c.j + 1));
+    ctx.closePath(); ctx.fill();
+  }
+
+  // 落ち影 → 建物（奥から手前へ painter's order）
+  const order = [...cells].sort((a, b) => (a.i + a.j) - (b.i + b.j) || (a.j - b.j));
+  for (const c of order) {
+    if (c.kind === "road" || c.h < 0.5) continue;
+    const h = c.h * (1 + c.hover * 0.28);
+    ctx.fillStyle = rgba(C.ink, 0.07 + Math.min(0.06, h / 900));
+    ctx.beginPath();
+    ctx.ellipse(ox + isoX(c.i + 0.5, c.j + 0.5) + h * 0.12, oy + isoY(c.i + 0.5, c.j + 0.5) + 2, hw * 0.7 + h * 0.08, hh * 0.7, 0, 0, 6.283);
+    ctx.fill();
+  }
+  for (const c of order) if (c.kind !== "road") drawBox(c, ox, oy);
+
+  canvas.style.cursor = hovered ? "pointer" : "default";
+  requestAnimationFrame(frame);
+};
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

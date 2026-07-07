@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="紙吹雪">
+<meta name="pattern-desc" content="クリック地点から紙片が爆ぜ、空気抵抗でひらひら回転しながら落ちる。矩形の3D回転で表裏を見せる。">
+<title>紙吹雪</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    font-size: .8rem; color: var(--color-fg-muted); letter-spacing: .04em;
+    background: color-mix(in srgb, var(--color-bg-elevated) 65%, transparent);
+    padding: .5rem 1rem; border-radius: 999px; pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">画面をタップで紙吹雪が爆ぜる</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h=h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c);
+  const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const mix = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const rgba = (c,a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+// パステル多色
+const PAL = [[91,188,177],[240,168,189],[241,209,137],[188,178,232],[243,168,144],[159,200,234],[169,220,192]];
+const C = {};
+const refresh = () => { C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.bg = hexRgb(token("--color-bg-primary", "#faf7f1")); };
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+let W=0, H=0, dpr=1;
+const resize = () => { dpr=Math.min(2, window.devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); };
+addEventListener("resize", resize); resize();
+
+const rmq = matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches; rmq.addEventListener?.("change", e => reduced = e.matches);
+
+const rand = (a,b) => a + Math.random()*(b-a);
+const GRAV = 620;             // px/s^2
+const DRAG = 0.86;            // 空気抵抗（速度減衰係数/秒相当）
+
+// 紙片: 矩形。3D 回転を rotX(表裏の scaleY 反転) と rotZ(面内回転)で表現
+const pieces = [];
+const MAX = 900;
+
+function burst(cx, cy, n) {
+  for (let i=0;i<n;i++){
+    const ang = rand(0, Math.PI*2);
+    const spd = rand(160, 520);
+    // 上向き優勢の噴出
+    const upBias = rand(0.2, 1);
+    const col = PAL[(Math.random()*PAL.length)|0];
+    pieces.push({
+      x: cx + rand(-6,6), y: cy + rand(-6,6),
+      vx: Math.cos(ang)*spd,
+      vy: Math.sin(ang)*spd - rand(120, 380)*upBias,
+      w: rand(7, 13), h: rand(9, 16),
+      rotZ: rand(0, Math.PI*2), vrotZ: rand(-8, 8),
+      rotX: rand(0, Math.PI*2), vrotX: rand(4, 12) * (Math.random()<0.5?-1:1),
+      wobble: rand(0,6.28), wobbleS: rand(4, 9),
+      col, colBack: mix(col, C.ink, 0.28),
+      life: 0, ttl: rand(3.4, 5.2),
+      settled: false,
+    });
+  }
+  while (pieces.length > MAX) pieces.shift();
+}
+
+function point(e){ const r=canvas.getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
+addEventListener("pointerdown", (e)=>{ const p=point(e); burst(p.x, p.y, reduced?26:78); });
+// 初回に一発
+setTimeout(()=>burst(W*0.5, H*0.55, reduced?26:70), 300);
+
+let last = performance.now();
+function frame(now) {
+  let dt = (now-last)/1000; last = now; if (dt>0.05) dt=0.05;
+
+  ctx.clearRect(0,0,W,H);
+  const dragF = Math.pow(DRAG, dt);
+
+  for (let i=pieces.length-1;i>=0;i--){
+    const p = pieces[i];
+    if (!reduced && !p.settled) {
+      p.life += dt;
+      // 空気抵抗（速度に比例して減衰）
+      p.vx *= dragF; p.vy *= dragF;
+      p.vy += GRAV * dt;
+      // ひらひら: 面の向き(rotX)に応じた横方向の揚力で蛇行
+      p.wobble += p.wobbleS * dt;
+      const lift = Math.sin(p.rotX) * 46;   // 面が傾くと横に滑る
+      p.x += (p.vx + lift + Math.sin(p.wobble)*22) * dt;
+      p.y += p.vy * dt;
+      p.rotZ += p.vrotZ * dt;
+      p.rotX += p.vrotX * dt;
+      p.vrotX *= Math.pow(0.985, dt*60);    // 回転も徐々に落ち着く
+      // 着地: 画面下端で静止
+      if (p.y > H - p.h*0.5) { p.y = H - p.h*0.5; p.settled = true; p.vx=0; p.vy=0; }
+    } else if (p.settled) {
+      p.life += dt;
+    }
+    // フェードアウト（寿命後）
+    let alpha = 1;
+    if (p.life > p.ttl) { alpha = Math.max(0, 1 - (p.life - p.ttl)/1.2); if (alpha<=0){ pieces.splice(i,1); continue; } }
+
+    // 3D 矩形の投影: scaleY = |cos(rotX)| で表裏の薄まり、cos<0 で裏面色
+    const c = Math.cos(p.rotX);
+    const facing = Math.abs(c);
+    const faceCol = c >= 0 ? p.col : p.colBack;
+    // エッジが立つ瞬間(facing→0)は細い線に
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rotZ);
+    ctx.scale(1, Math.max(0.04, facing));
+    ctx.globalAlpha = alpha * (0.82 + facing*0.18);
+    // 面の陰影（軽いグラデ）
+    ctx.fillStyle = rgba(faceCol, 1);
+    ctx.beginPath();
+    const w=p.w, h=p.h, r=Math.min(w,h)*0.22;
+    // 角丸矩形
+    ctx.moveTo(-w/2+r, -h/2);
+    ctx.arcTo(w/2, -h/2, w/2, h/2, r);
+    ctx.arcTo(w/2, h/2, -w/2, h/2, r);
+    ctx.arcTo(-w/2, h/2, -w/2, -h/2, r);
+    ctx.arcTo(-w/2, -h/2, w/2, -h/2, r);
+    ctx.closePath();
+    ctx.fill();
+    // ハイライト筋
+    ctx.globalAlpha = alpha * facing * 0.35;
+    ctx.fillStyle = rgba(mix(faceCol,[255,255,255],0.6), 1);
+    ctx.fillRect(-w/2, -h/2, w, h*0.28);
+    ctx.restore();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

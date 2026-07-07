@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="触れる水面">
+<meta name="pattern-desc" content="2次元波動方程式を差分法で解き、クリックやドラッグで生まれた波紋が互いに干渉する水面。">
+<title>触れる水面</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>触れる水面</h1>
+  <p>クリック・ドラッグで波紋が広がります。波は互いに干渉し、やがて静けさへ戻ります。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // ---- デザイントークン（cream light をフォールバックに）----
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let base, hi, lo; // 水面の基調色 / ハイライト / 陰影
+  function readColors() {
+    const bg = hex(token("--color-bg-primary", "#faf7f1"));
+    const elevated = hex(token("--color-bg-elevated", "#fffdf9"));
+    const accent = hex(token("--color-accent-default", "#5bbcb1"));
+    const deep = hex(token("--color-accent-fg", "#07312d"));
+    base = mix(bg, accent, 0.34);          // 生成りにティールを溶かした水の色
+    hi = mix(elevated, accent, 0.10);      // 光の面
+    lo = mix(base, deep, 0.62);            // 影の面
+    fillBorder();
+  }
+
+  // ---- 波動シミュレーション（高さバッファ 2 枚の差分法）----
+  const CS = 4;                 // 1 セル = 4 css px
+  const DAMP = 0.986;           // 減衰
+  let W = 0, H = 0, gw = 0, gh = 0;
+  let cur = new Float32Array(0), prev = new Float32Array(0);
+  let off, octx, img;
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    gw = Math.ceil(W / CS) + 2;
+    gh = Math.ceil(H / CS) + 2;
+    cur = new Float32Array(gw * gh);
+    prev = new Float32Array(gw * gh);
+    off = document.createElement("canvas");
+    off.width = gw; off.height = gh;
+    octx = off.getContext("2d");
+    img = octx.createImageData(gw, gh);
+    const d = img.data;
+    for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    fillBorder();
+  }
+
+  function fillBorder() {
+    if (!img || !base) return;
+    const d = img.data;
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        if (y === 0 || y === gh - 1 || x === 0 || x === gw - 1) {
+          const p = (y * gw + x) * 4;
+          d[p] = base[0]; d[p + 1] = base[1]; d[p + 2] = base[2];
+        }
+      }
+    }
+  }
+
+  // 1 ステップ: prev を書き換え → swap（古典的な 2 バッファ水面）
+  function step() {
+    for (let y = 1; y < gh - 1; y++) {
+      let i = y * gw + 1;
+      for (let x = 1; x < gw - 1; x++, i++) {
+        prev[i] = ((cur[i - 1] + cur[i + 1] + cur[i - gw] + cur[i + gw]) * 0.5 - prev[i]) * DAMP;
+      }
+    }
+    const t = cur; cur = prev; prev = t;
+  }
+
+  // ガウス状のしずくを落とす
+  function drop(px, py, amp, rad) {
+    const cx = Math.round(px / CS), cy = Math.round(py / CS);
+    const r = Math.max(1, Math.round(rad));
+    for (let dy = -r; dy <= r; dy++) {
+      const y = cy + dy;
+      if (y < 1 || y >= gh - 1) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        const x = cx + dx;
+        if (x < 1 || x >= gw - 1) continue;
+        const q = (dx * dx + dy * dy) / (r * r);
+        if (q > 1) continue;
+        cur[y * gw + x] += amp * Math.exp(-q * 3.2);
+      }
+    }
+  }
+
+  // ---- 描画: 高さの勾配 × 光の向きで擬似ライティング ----
+  const LX = -0.7071, LY = -0.7071; // 左上からの光
+  function render() {
+    const d = img.data;
+    for (let y = 1; y < gh - 1; y++) {
+      let i = y * gw + 1;
+      for (let x = 1; x < gw - 1; x++, i++) {
+        const gx = cur[i + 1] - cur[i - 1];
+        const gy = cur[i + gw] - cur[i - gw];
+        let l = (gx * LX + gy * LY) * 0.9 + cur[i] * 0.05;
+        const p = i * 4;
+        if (l > 0) {
+          l += l * l * 1.6;               // 弱いスペキュラで水らしいきらめき
+          if (l > 1) l = 1;
+          d[p]     = base[0] + (hi[0] - base[0]) * l;
+          d[p + 1] = base[1] + (hi[1] - base[1]) * l;
+          d[p + 2] = base[2] + (hi[2] - base[2]) * l;
+        } else {
+          l = -l; if (l > 1) l = 1;
+          d[p]     = base[0] + (lo[0] - base[0]) * l;
+          d[p + 1] = base[1] + (lo[1] - base[1]) * l;
+          d[p + 2] = base[2] + (lo[2] - base[2]) * l;
+        }
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(off, 0, 0, gw, gh, -CS, -CS, gw * CS, gh * CS);
+  }
+
+  // ---- 入力（ポインタ = マウス / タッチ共通）----
+  let lastX = -1, lastY = -1, pressed = false;
+  canvas.addEventListener("pointerdown", (e) => {
+    pressed = true;
+    canvas.setPointerCapture(e.pointerId);
+    drop(e.clientX, e.clientY, -3.4, 3);
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    const x = e.clientX, y = e.clientY;
+    if (pressed) {
+      // ドラッグの軌跡に沿って連続的にしずくを置く
+      const dx = x - lastX, dy = y - lastY;
+      const dist = Math.hypot(dx, dy);
+      const n = Math.max(1, Math.floor(dist / 8));
+      for (let k = 1; k <= n; k++) drop(lastX + dx * k / n, lastY + dy * k / n, -1.6, 2);
+      lastX = x; lastY = y;
+    } else if (lastX >= 0) {
+      const dist = Math.hypot(x - lastX, y - lastY);
+      if (dist > 14) { drop(x, y, -0.35, 2); lastX = x; lastY = y; } // 触れるだけの微かなさざ波
+    } else { lastX = x; lastY = y; }
+  });
+  const release = () => { pressed = false; };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+
+  // ---- メインループ（デルタ時間・固定ステップ）----
+  let last = performance.now(), acc = 0, ambient = 1.2;
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;
+    acc += dt;
+    const STEP = 1 / 120;
+    let n = 0;
+    while (acc >= STEP && n < 4) { step(); acc -= STEP; n++; }
+    if (acc >= STEP) acc = 0; // 追い付けないフレームは切り捨て
+
+    if (!rm.matches) {         // 常時演出: 時折どこかに雫が落ちる（reduce では停止）
+      ambient -= dt;
+      if (ambient <= 0) {
+        ambient = 2.2 + Math.random() * 3.4;
+        drop(Math.random() * W, Math.random() * H, -1.7, 2.5);
+      }
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // テーマ / 外観の切替に追従（次フレームから新色）
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  if (!rm.matches) {
+    // 開いた瞬間から水面が生きているよう、最初の雫を落としておく
+    drop(W * 0.38, H * 0.42, -3.0, 3);
+    drop(W * 0.66, H * 0.58, -2.2, 2.5);
+    drop(W * 0.52, H * 0.30, -1.6, 2);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

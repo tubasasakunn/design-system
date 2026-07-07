@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="二重らせん">
+<meta name="pattern-desc" content="3D投影した2本の鎖と塩基対の梯子が回りつづける。横ドラッグで回転速度、縦ドラッグで傾きを操作。">
+<title>二重らせん</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); color: var(--color-fg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #stage.dragging { cursor: grabbing; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">横にドラッグ＝回す速さ ─ 縦にドラッグ＝かたむき</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const reduceMq = matchMedia("(prefers-reduced-motion: reduce)");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const C = {};
+const refreshColors = () => {
+  C.bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.acc = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accH = hexRgb(token("--color-accent-hover", "#46a89d"));
+  const dark = (0.299 * C.bg[0] + 0.587 * C.bg[1] + 0.114 * C.bg[2]) / 255 < 0.45;
+  C.strandA = C.acc;
+  C.strandB = dark ? mix(C.accH, [230, 240, 238], 0.35) : C.accH;
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス ----
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+resize();
+addEventListener("resize", resize);
+
+// ---- 塩基対（A-T / G-C）: 4色のパステルを対で使う ----
+const BASE = [
+  [hexRgb("#f0a8bd"), hexRgb("#f1d189")], // A-T: pink / yellow
+  [hexRgb("#bcb2e8"), hexRgb("#9fc8ea")], // G-C: lavender / sky
+];
+const RUNGS = 34;                    // 塩基対の数
+const seq = [];
+{
+  let s = 20260706;
+  const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < RUNGS; i++) seq.push({ pair: rnd() < 0.5 ? 0 : 1, flip: rnd() < 0.5 });
+}
+
+// ---- らせんパラメータと操作状態 ----
+const TWIST = (Math.PI * 2) / 10.5;  // 1塩基あたりのねじれ
+const RADIUS = 74;
+const BASE_SPEED = 0.55;             // 標準の回転速度 rad/s
+const st = {
+  phase: 0,
+  speed: BASE_SPEED,   // 現在速度（ドラッグで加減、離すと基準へ戻る）
+  tilt: 0.22, tiltT: 0.22,
+};
+let dragging = false, lastX = 0, lastY = 0, flingV = 0;
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  canvas.classList.add("dragging"); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  st.phase += dx * 0.012;            // 直接まわす
+  flingV = dx * 0.012 * 60;          // 離した後の勢い
+  st.tiltT = Math.max(-0.9, Math.min(0.9, st.tiltT + dy * 0.004));
+});
+const endDrag = () => { dragging = false; canvas.classList.remove("dragging"); };
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+// ---- 3D 投影（傾き Rx(tilt) → 奥行き）----
+const CAM = 480, FOCAL = 520;
+let ct_, stt_;
+const project = (x, y, z) => {
+  const y1 = y * ct_ - z * stt_, z1 = y * stt_ + z * ct_;
+  const depth = CAM + z1;
+  const s = FOCAL / Math.max(80, depth);
+  return { x: W / 2 + x * s, y: H / 2 + y1 * s, s, depth };
+};
+// らせん軸まわりの局所奥行き → 手前度 0..1（傾きの影響を受けない）
+const nearness = (zl) => Math.max(0, Math.min(1, 0.5 - zl / (RADIUS * 2)));
+
+let last = performance.now();
+const frame = (now) => {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const reduce = reduceMq.matches;
+
+  // 速度: 離した勢いを取り込み、基準速度へゆっくり回帰
+  if (!dragging) {
+    st.speed += (flingV - st.speed) * Math.min(1, dt * 4);
+    flingV += ((reduce ? 0 : BASE_SPEED) - flingV) * Math.min(1, dt * 1.2);
+    st.phase += st.speed * dt;
+  }
+  st.tilt += (st.tiltT - st.tilt) * Math.min(1, dt * 8);
+  ct_ = Math.cos(st.tilt); stt_ = Math.sin(st.tilt);
+
+  ctx.clearRect(0, 0, W, H);
+  const span = Math.min(H * 0.7, 560);
+  const stepY = span / (RUNGS - 1);
+  const items = [];
+
+  // らせん上の点を作る（2本の鎖 + 梯子）
+  const pts = [[], []];
+  for (let i = 0; i < RUNGS; i++) {
+    const y = -span / 2 + i * stepY;
+    const a = st.phase + i * TWIST;
+    const wob = reduce ? 0 : Math.sin(now / 1400 + i * 0.35) * 3; // 呼吸のような揺らぎ
+    for (let k = 0; k < 2; k++) {
+      const ang = a + k * Math.PI;
+      const zl = Math.sin(ang) * (RADIUS + wob);
+      pts[k].push({ p3: [Math.cos(ang) * (RADIUS + wob), y, zl], zl });
+    }
+  }
+  // 鎖のセグメント
+  for (let k = 0; k < 2; k++) {
+    for (let i = 0; i < RUNGS - 1; i++) {
+      const a = project(...pts[k][i].p3), b = project(...pts[k][i + 1].p3);
+      items.push({ depth: (a.depth + b.depth) / 2, kind: "strand", a, b, k, zl: (pts[k][i].zl + pts[k][i + 1].zl) / 2 });
+    }
+  }
+  // 梯子（塩基対）: 中央で2色に分かれる
+  for (let i = 0; i < RUNGS; i++) {
+    const a = project(...pts[0][i].p3), b = project(...pts[1][i].p3);
+    const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const [c1, c2] = BASE[seq[i].pair];
+    const colA = seq[i].flip ? c2 : c1, colB = seq[i].flip ? c1 : c2;
+    items.push({ depth: (a.depth + b.depth) / 2, kind: "rung", a, b, m, colA, colB, na: nearness(pts[0][i].zl), nb: nearness(pts[1][i].zl) });
+  }
+  // ヌクレオチドの珠（鎖の節）
+  for (let k = 0; k < 2; k++) for (let i = 0; i < RUNGS; i++) {
+    const q = project(...pts[k][i].p3);
+    items.push({ depth: q.depth, kind: "node", q, k, zl: pts[k][i].zl });
+  }
+
+  items.sort((x, y) => y.depth - x.depth); // 遠い順に描く
+
+  ctx.lineCap = "round";
+  for (const it of items) {
+    const n = it.kind === "rung" ? (it.na + it.nb) / 2 : nearness(it.zl); // 0=奥 1=手前
+    if (it.kind === "strand") {
+      const col = it.k === 0 ? C.strandA : C.strandB;
+      ctx.strokeStyle = rgba(mix(mix(col, C.bg, 0.55), col, n), 0.25 + n * 0.75);
+      ctx.lineWidth = 1.4 + n * 3.6;
+      ctx.beginPath(); ctx.moveTo(it.a.x, it.a.y); ctx.lineTo(it.b.x, it.b.y); ctx.stroke();
+    } else if (it.kind === "rung") {
+      ctx.lineWidth = 1 + n * 2.4;
+      ctx.strokeStyle = rgba(mix(it.colA, C.bg, 1 - (0.4 + it.na * 0.6)), 0.25 + it.na * 0.65);
+      ctx.beginPath(); ctx.moveTo(it.a.x, it.a.y); ctx.lineTo(it.m.x, it.m.y); ctx.stroke();
+      ctx.strokeStyle = rgba(mix(it.colB, C.bg, 1 - (0.4 + it.nb * 0.6)), 0.25 + it.nb * 0.65);
+      ctx.beginPath(); ctx.moveTo(it.m.x, it.m.y); ctx.lineTo(it.b.x, it.b.y); ctx.stroke();
+      // 中央の結合点
+      ctx.fillStyle = rgba(C.ink, 0.1 + n * 0.2);
+      ctx.beginPath(); ctx.arc(it.m.x, it.m.y, 0.8 + n * 1.2, 0, 6.283); ctx.fill();
+    } else {
+      const col = it.k === 0 ? C.strandA : C.strandB;
+      const r = 1.6 + n * 3.4;
+      const g = ctx.createRadialGradient(it.q.x - r * 0.3, it.q.y - r * 0.3, r * 0.2, it.q.x, it.q.y, r);
+      g.addColorStop(0, rgba(mix(col, [255, 255, 255], 0.5), 0.3 + n * 0.7));
+      g.addColorStop(1, rgba(mix(col, C.bg, 0.5 * (1 - n)), 0.3 + n * 0.7));
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(it.q.x, it.q.y, r, 0, 6.283); ctx.fill();
+    }
+  }
+
+  requestAnimationFrame(frame);
+};
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

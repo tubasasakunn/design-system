@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="桜吹雪">
+<meta name="pattern-desc" content="花びらが3D回転しながら舞い落ち、ポインタの動きが風となって渦を巻く。奥行きで大きさ・速さ・ぼけが変わる。">
+<title>桜吹雪</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: linear-gradient(180deg, var(--color-bg-secondary), var(--color-bg-primary)); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    font-size: .8rem; color: var(--color-fg-muted); letter-spacing: .04em;
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    padding: .5rem 1rem; border-radius: 999px; pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">ポインタを動かすと風が起きる</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h=h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c);
+  const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const mix = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const rgba = (c,a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+const PINK = [240,168,189], PINK_DEEP = [214,132,158], PINK_PALE = [250,222,228];
+const C = {};
+const refresh = () => {
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.pale = mix(PINK_PALE, hexRgb(token("--color-bg-elevated", "#fffdf9")), 0.35);
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+let W=0, H=0, dpr=1;
+const resize = () => { dpr=Math.min(2, window.devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); };
+addEventListener("resize", resize); resize();
+
+const rmq = matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches; rmq.addEventListener?.("change", e => reduced = e.matches);
+
+const rand = (a,b) => a + Math.random()*(b-a);
+const COUNT = Math.min(220, Math.round(W*H/7000));
+
+// 風の場: ポインタ速度から与えられる横方向の突風 + 基調のそよ風
+let windX = 0, gust = 0;
+let pointer = { x: W/2, y: H/2, px: W/2, py: H/2, vx: 0, vy: 0, active: false };
+
+// 花びら: 5枚花弁のシルエットを 3D 回転(位相 phase)で見せる。z で奥行き(0=奥, 1=手前)
+const petals = [];
+function spawn(reset) {
+  const z = Math.random();
+  return {
+    x: rand(-40, W+40),
+    y: reset ? rand(-H, 0) : rand(-40, H),
+    z,
+    size: 7 + z*13,               // 奥行きで大きさ
+    phase: rand(0, Math.PI*2),    // 3D 回転位相
+    spin: rand(0.6, 2.2) * (Math.random()<0.5?-1:1),
+    sway: rand(0, Math.PI*2),
+    swaySpeed: rand(0.7, 1.6),
+    swayAmp: rand(14, 40),
+    fall: (0.4 + z) * rand(26, 40), // 手前ほど速く落ちる
+    hueT: rand(0, 1),
+    vx: 0, vy: 0,
+  };
+}
+for (let i=0;i<COUNT;i++) petals.push(spawn(false));
+
+// 花びら形状（正規化: おおよそ半径1）。1枚の花弁シェイプ、cx で表裏の膨らみを制御
+function petalPath(cx) {
+  ctx.beginPath();
+  ctx.moveTo(0, 0.95);
+  ctx.bezierCurveTo(0.85*cx, 0.7, 0.55*cx, -0.55, 0, -0.95);
+  ctx.bezierCurveTo(-0.55*cx, -0.55, -0.85*cx, 0.7, 0, 0.95);
+  ctx.closePath();
+}
+
+function onMove(e) {
+  const r = canvas.getBoundingClientRect();
+  pointer.x = e.clientX - r.left; pointer.y = e.clientY - r.top;
+  pointer.active = true;
+}
+addEventListener("pointermove", onMove);
+addEventListener("pointerdown", (e)=>{ onMove(e); gust += 34; });
+
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0.05) dt = 0.05;
+
+  // ポインタ速度 → 突風
+  pointer.vx = pointer.x - pointer.px; pointer.vy = pointer.y - pointer.py;
+  pointer.px = pointer.x; pointer.py = pointer.y;
+  if (!reduced) {
+    windX += (pointer.vx*0.15 - windX) * Math.min(1, dt*4);
+    gust *= Math.pow(0.86, dt*60);
+  } else { windX = 0; gust *= 0.8; }
+
+  // 背景（生成りグラデはCSS。canvasは薄いクリアで残像なし）
+  ctx.clearRect(0,0,W,H);
+  const baseWind = reduced ? 0 : Math.sin(now/2600)*10;
+
+  // 奥から手前へ描くため z ソートは軽量に（配列順で概ねOK、明示ソート）
+  petals.sort((a,b)=>a.z-b.z);
+
+  for (const p of petals) {
+    if (!reduced) {
+      p.phase += p.spin * dt;
+      p.sway += p.swaySpeed * dt;
+      // 落下 + そよぎ + 風（手前ほど風の影響大）
+      const swayX = Math.cos(p.sway) * p.swayAmp;
+      const wind = (baseWind + windX*8*(0.4+p.z)) + Math.sin(p.sway*0.6)*gust*(0.4+p.z);
+      p.x += (wind*dt) + swayX*dt;
+      p.y += p.fall * dt * 22;
+      // ポインタ周りに緩い渦
+      if (pointer.active) {
+        const dx = p.x-pointer.x, dy = p.y-pointer.y, d2 = dx*dx+dy*dy;
+        if (d2 < 26000) {
+          const f = (1 - d2/26000) * gust * 0.6;
+          p.x += (-dy)/Math.sqrt(d2+1) * f * dt * 40;
+          p.y += ( dx)/Math.sqrt(d2+1) * f * dt * 40;
+        }
+      }
+    }
+    // 画面外へ出たら上から再投入
+    if (p.y > H+40 || p.x < -80 || p.x > W+80) Object.assign(p, spawn(true));
+
+    // 3D 回転の投影: cos(phase) で横スケール(表裏の反転)、少しの傾き
+    const c = Math.cos(p.phase);
+    const facing = Math.abs(c);                 // 0=真横(細い) 1=正面
+    const cx = 0.55 + facing*0.45;              // 花弁の膨らみ
+    const col = c >= 0 ? mix(PINK, PINK_PALE, p.hueT*0.5)
+                       : mix(PINK_DEEP, PINK, p.hueT*0.5); // 表裏で色差
+    // 奥行きのぼけ: 奥は小さく淡く
+    const alpha = 0.55 + p.z*0.4;
+    const blur = (1 - p.z) * 2.2;
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(Math.sin(p.phase*0.5)*0.5 + p.sway*0.15);
+    ctx.scale(p.size, p.size * (0.35 + facing*0.65)); // phase で縦つぶれ→3D感
+    if (blur > 0.2 && !reduced) { ctx.globalAlpha = alpha*0.5; ctx.filter = `blur(${blur}px)`; }
+    // 5弁の花としてまとめて描くとコスト高なので単花弁を回転させて花に
+    ctx.globalAlpha = alpha;
+    ctx.filter = "none";
+    const grad = ctx.createLinearGradient(0, -0.95, 0, 0.95);
+    grad.addColorStop(0, rgba(col, alpha*0.92));
+    grad.addColorStop(1, rgba(mix(col, C.pale, 0.5), alpha*0.7));
+    ctx.fillStyle = grad;
+    // 3枚の弁を重ねて花びららしく（回転コピー、負荷は許容範囲）
+    for (let k=-1;k<=1;k++){
+      ctx.save();
+      ctx.rotate(k*0.5);
+      petalPath(cx);
+      ctx.fill();
+      ctx.restore();
+    }
+    // 中心の切れ込み陰影
+    ctx.globalAlpha = alpha*0.25;
+    ctx.strokeStyle = rgba(PINK_DEEP, 0.5);
+    ctx.lineWidth = 0.06;
+    ctx.beginPath(); ctx.moveTo(0, 0.6); ctx.lineTo(0, -0.2); ctx.stroke();
+    ctx.restore();
+  }
+  pointer.active = false || (Math.hypot(pointer.vx,pointer.vy) > 0.5);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="跳ねるボール">
+<meta name="pattern-desc" content="重力と反発で跳ねるボール。接地でスカッシュ、離陸でストレッチ。掴んで投げると速度を引き継ぐ。">
+<title>跳ねるボール</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>跳ねるボール</h1>
+  <p>掴んで投げると勢いが乗ります。地面でつぶれ、飛び立つ瞬間に伸びる。放っておくと静かに収まります。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  let C = {};
+  function readColors() {
+    C = {
+      bg:    token("--color-bg-primary", "#faf7f1"),
+      floor: token("--color-bg-secondary", "#f1ece2"),
+      ball:  token("--color-accent-default", "#5bbcb1"),
+      hi:    token("--color-bg-elevated", "#fffdf9"),
+      deep:  token("--color-accent-fg", "#07312d"),
+      ink:   token("--color-fg-primary", "#2c2a26"),
+      border:token("--color-border-strong", "#ddd5c6"),
+    };
+  }
+  const mix = (a, b, t) => {
+    const p = (h) => { h = h.replace("#",""); if (h.length===3) h=h.split("").map(c=>c+c).join(""); const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+    const A = p(a), B = p(b);
+    return `rgb(${Math.round(A[0]+(B[0]-A[0])*t)},${Math.round(A[1]+(B[1]-A[1])*t)},${Math.round(A[2]+(B[2]-A[2])*t)})`;
+  };
+
+  let W = 0, H = 0, R = 44, floorY = 0;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    R = Math.max(34, Math.min(W, H) * 0.075);
+    floorY = H - Math.max(70, H * 0.12);
+    if (ball.x === 0) { ball.x = W / 2; ball.y = floorY - R - 200; }
+  }
+
+  const GRAV = 2200;       // 重力 px/s^2
+  const REST = 0.74;       // 反発係数
+  const AIR = 0.06;        // 空気抵抗
+  const ball = { x: 0, y: 0, vx: 0, vy: 0 };
+  // スカッシュ用のばね（衝突で励起される減衰振動）。0=球, 正=法線方向につぶれる
+  let squash = 0, squashV = 0, squashNX = 0, squashNY = 1;
+
+  function update(dt) {
+    if (grab.active) return; // 掴んでいる間は物理を止めて手に追従
+    // 重力・空気抵抗
+    ball.vy += GRAV * dt;
+    ball.vx *= (1 - AIR * dt);
+    ball.vy *= (1 - AIR * dt);
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+
+    // 壁・床・天井の衝突（法線方向にスカッシュを励起）
+    let hit = false, nx = 0, ny = 0, impact = 0;
+    if (ball.y + R > floorY) { ball.y = floorY - R; impact = -ball.vy; ball.vy = -ball.vy * REST; ball.vx *= 0.985; nx = 0; ny = 1; hit = true; }
+    if (ball.x - R < 0) { ball.x = R; impact = Math.abs(ball.vx); ball.vx = -ball.vx * REST; nx = 1; ny = 0; hit = true; }
+    if (ball.x + R > W) { ball.x = W - R; impact = Math.abs(ball.vx); ball.vx = -ball.vx * REST; nx = 1; ny = 0; hit = true; }
+    if (ball.y - R < 0) { ball.y = R; impact = Math.abs(ball.vy); ball.vy = -ball.vy * REST; nx = 0; ny = 1; hit = true; }
+    if (hit && impact > 60 && !rm.matches) {
+      const k = Math.min(impact / 1600, 1);
+      squashV += k * 26;               // 衝突の強さでつぶれを励起
+      squashNX = nx; squashNY = ny;
+    }
+    // ほぼ静止したら微振動を殺す
+    if (Math.abs(ball.vy) < 24 && ball.y + R >= floorY - 0.5) ball.vy = 0;
+
+    // スカッシュばね（減衰振動で球へ戻る）
+    const sa = -squash * 260 - squashV * 12;
+    squashV += sa * dt; squash += squashV * dt;
+
+    // 飛行中は速度方向のストレッチ（体積保存）— 描画時に反映
+  }
+
+  // ---- ドラッグで掴んで投げる ----
+  const grab = { active: false, dx: 0, dy: 0, id: -1 };
+  const hist = [];   // 直近の位置履歴で放り投げ速度を推定
+  function pushHist(x, y, t) { hist.push({ x, y, t }); while (hist.length > 6) hist.shift(); }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    const x = e.clientX, y = e.clientY;
+    if (Math.hypot(x - ball.x, y - ball.y) <= R * 1.25) {
+      grab.active = true; grab.id = e.pointerId;
+      grab.dx = ball.x - x; grab.dy = ball.y - y;
+      ball.vx = 0; ball.vy = 0;
+      hist.length = 0; pushHist(x, y, performance.now());
+      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = "grabbing";
+    }
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!grab.active) return;
+    ball.x = e.clientX + grab.dx;
+    ball.y = e.clientY + grab.dy;
+    ball.x = Math.max(R, Math.min(W - R, ball.x));
+    ball.y = Math.max(R, Math.min(floorY - R, ball.y));
+    pushHist(e.clientX, e.clientY, performance.now());
+  });
+  function release() {
+    if (!grab.active) return;
+    grab.active = false;
+    canvas.style.cursor = "grab";
+    // 履歴から速度を推定して引き継ぐ
+    if (hist.length >= 2) {
+      const a = hist[0], b = hist[hist.length - 1];
+      const dtms = Math.max((b.t - a.t) / 1000, 0.001);
+      ball.vx = (b.x - a.x) / dtms;
+      ball.vy = (b.y - a.y) / dtms;
+      const sp = Math.hypot(ball.vx, ball.vy);
+      const cap = 2600;
+      if (sp > cap) { ball.vx *= cap / sp; ball.vy *= cap / sp; }
+    }
+  }
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // 床
+    ctx.fillStyle = C.floor;
+    ctx.fillRect(0, floorY, W, H - floorY);
+    ctx.strokeStyle = C.border; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, floorY + 0.5); ctx.lineTo(W, floorY + 0.5); ctx.stroke();
+
+    // 影（高さで薄く・小さく）
+    const airGap = Math.max(0, (floorY - (ball.y + R)) / (floorY));
+    const shScale = 1 - airGap * 0.5;
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(ball.x, floorY + 4, R * 0.95 * shScale, R * 0.24 * shScale, 0, 0, Math.PI * 2);
+    ctx.fillStyle = mix(C.floor, C.ink, 0.22 * (1 - airGap * 0.6));
+    ctx.filter = "blur(4px)";
+    ctx.fill();
+    ctx.restore();
+
+    // 速度ストレッチ + 衝突スカッシュを合成
+    const speed = Math.hypot(ball.vx, ball.vy);
+    const velStretch = grab.active ? 1 : Math.min(1 + speed * 0.00022, 1.4);
+    const vdir = speed > 1 ? Math.atan2(ball.vy, ball.vx) : Math.PI / 2;
+
+    ctx.save();
+    ctx.translate(ball.x, ball.y);
+    // 衝突スカッシュ: 法線方向に縮める（clamp）
+    const sq = Math.max(-0.55, Math.min(squash * 0.02, 0.55));
+    const nAng = Math.atan2(squashNY, squashNX);
+    // まず速度方向のストレッチ
+    ctx.rotate(vdir);
+    ctx.scale(velStretch, 1 / velStretch);
+    ctx.rotate(-vdir);
+    // 次に衝突法線方向のスカッシュ
+    ctx.rotate(nAng);
+    ctx.scale(1 - sq, 1 + sq * 0.7);
+    ctx.rotate(-nAng);
+
+    // 本体
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    const g = ctx.createRadialGradient(-R * 0.32, -R * 0.4, R * 0.1, 0, 0, R * 1.4);
+    g.addColorStop(0, mix(C.ball, C.hi, 0.55));
+    g.addColorStop(0.62, C.ball);
+    g.addColorStop(1, mix(C.ball, C.deep, 0.34));
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = mix(C.ball, C.deep, 0.4); ctx.lineWidth = 2; ctx.stroke();
+    // つや
+    ctx.beginPath();
+    ctx.ellipse(-R * 0.32, -R * 0.4, R * 0.28, R * 0.18, -0.5, 0, Math.PI * 2);
+    ctx.fillStyle = mix(C.hi, C.ball, 0.1); ctx.globalAlpha = 0.6; ctx.fill();
+    ctx.restore();
+  }
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    acc += dt;
+    const STEP = 1 / 240; let n = 0;
+    while (acc >= STEP && n < 12) { update(STEP); acc -= STEP; n++; }
+    if (acc >= STEP) acc = 0;
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  readColors();
+  resize();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

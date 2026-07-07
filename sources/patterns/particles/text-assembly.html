@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>文字に集う粒子</title>
+<meta name="pattern-title" content="文字に集う粒子">
+<meta name="pattern-desc" content="散らばった粒子が飛来して文字の形に整列し、クリックで散って次の語へ移る。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; display: block; touch-action: none; cursor: pointer; }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .04em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hint">クリック / タップで次の言葉へ</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d");
+  const root = document.documentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+  let COL = {};
+  function readColors() {
+    COL = {
+      ink:    token("--color-fg-primary", "#2c2a26"),
+      soft:   token("--color-fg-secondary", "#6c655b"),
+      accent: token("--color-accent-default", "#5bbcb1"),
+    };
+  }
+  readColors();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  const words = ["静けさ", "余白", "ゆらぎ", "光", "こだわり", "手ざわり"];
+  let wordIndex = 0;
+
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildTargets();
+  }
+
+  // オフスクリーンに文字を描いてピクセルをサンプリングし、目標点を得る
+  const off = document.createElement("canvas");
+  const offCtx = off.getContext("2d", { willReadFrequently: true });
+
+  function sampleWord(text) {
+    const maxW = Math.min(W * 0.82, 900);
+    let fontPx = Math.min(H * 0.34, 260);
+    // 幅に収まるフォントサイズを求める
+    for (let i = 0; i < 8; i++) {
+      offCtx.font = `700 ${fontPx}px system-ui, sans-serif`;
+      const w = offCtx.measureText(text).width;
+      if (w <= maxW) break;
+      fontPx *= maxW / w;
+    }
+    offCtx.font = `700 ${fontPx}px system-ui, sans-serif`;
+    const metrics = offCtx.measureText(text);
+    const textW = Math.ceil(metrics.width) + 8;
+    const textH = Math.ceil(fontPx * 1.25);
+    off.width = textW; off.height = textH;
+    offCtx.clearRect(0, 0, textW, textH);
+    offCtx.fillStyle = "#000";
+    offCtx.textBaseline = "middle";
+    offCtx.textAlign = "left";
+    offCtx.font = `700 ${fontPx}px system-ui, sans-serif`;
+    offCtx.fillText(text, 4, textH / 2);
+
+    const img = offCtx.getImageData(0, 0, textW, textH).data;
+    const pts = [];
+    // 密度は画面サイズに応じてサンプリング間隔を調整
+    const step = Math.max(3, Math.round(fontPx / 46));
+    for (let y = 0; y < textH; y += step) {
+      for (let x = 0; x < textW; x += step) {
+        const a = img[(y * textW + x) * 4 + 3];
+        if (a > 128) {
+          // わずかなジッタで格子感を消す
+          pts.push({
+            x: x + (Math.random() - 0.5) * step,
+            y: y + (Math.random() - 0.5) * step,
+          });
+        }
+      }
+    }
+    return { pts, textW, textH };
+  }
+
+  const particles = [];
+  function makeParticle() {
+    return {
+      x: Math.random() * W, y: Math.random() * H,
+      vx: 0, vy: 0,
+      tx: W / 2, ty: H / 2,
+      size: 1.4 + Math.random() * 1.6,
+      hue: Math.random(),        // accent と ink の混色比
+      wander: Math.random() * Math.PI * 2,
+      scattered: true,
+    };
+  }
+
+  function buildTargets() {
+    if (!W) return;
+    const { pts, textW, textH } = sampleWord(words[wordIndex]);
+    const ox = (W - textW) / 2;
+    const oy = (H - textH) / 2;
+    // 必要数の粒子を確保
+    while (particles.length < pts.length) particles.push(makeParticle());
+    // シャッフルして割り当て（連続した見た目を避ける）
+    for (let i = pts.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = pts[i]; pts[i] = pts[j]; pts[j] = t;
+    }
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      if (i < pts.length) {
+        p.tx = ox + pts[i].x;
+        p.ty = oy + pts[i].y;
+        p.active = true;
+      } else {
+        p.active = false;
+      }
+      p.scattered = true;
+      p.scatterT = 0;
+    }
+  }
+
+  // クリックで散らして次の語へ
+  function nextWord(px, py) {
+    for (const p of particles) {
+      const dx = p.x - px, dy = p.y - py;
+      const d = Math.hypot(dx, dy) || 1;
+      const force = 120 + 34000 / d;
+      p.vx += (dx / d) * force + (Math.random() - 0.5) * 80;
+      p.vy += (dy / d) * force + (Math.random() - 0.5) * 80;
+    }
+    wordIndex = (wordIndex + 1) % words.length;
+    // 少し散らばりを味わってから整列
+    scatterHold = 0.42;
+    buildTargets();
+  }
+  let scatterHold = 0;
+
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture?.(e.pointerId);
+    nextWord(e.clientX, e.clientY);
+  });
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+    if (scatterHold > 0) scatterHold -= dt;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // 臨界減衰に近いばね（フレームレート非依存）
+    const stiff = reduce.matches ? 26 : 16;
+    const damp = Math.exp(-9 * dt); // 速度の指数減衰
+
+    for (const p of particles) {
+      if (!p.active) {
+        // 余った粒子は静かに漂わせて薄く
+        p.vx *= damp; p.vy *= damp;
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        continue;
+      }
+      if (scatterHold <= 0) {
+        // ばね加速で目標へ、速度は減衰させて収束
+        p.vx += (p.tx - p.x) * stiff * dt;
+        p.vy += (p.ty - p.y) * stiff * dt;
+      }
+      p.vx *= damp; p.vy *= damp;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+
+    // 描画
+    for (const p of particles) {
+      if (!p.active) continue;
+      const speed = Math.hypot(p.vx, p.vy);
+      const settle = Math.max(0, 1 - speed / 40); // 収束度
+      const r = p.size * (1 + settle * 0.4);
+      // 収束するほど accent 寄り、飛翔中は ink 寄り
+      ctx.fillStyle = settle > 0.55 ? COL.accent : (settle > 0.2 ? COL.soft : COL.ink);
+      ctx.globalAlpha = 0.55 + settle * 0.45;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

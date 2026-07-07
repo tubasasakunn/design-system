@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ゴーイーメニュー">
+<meta name="pattern-desc" content="SVG フィルタのゴーイー効果で、FAB からメニュー玉がにゅるっと分裂・融合するメニュー。">
+<title>ゴーイーメニュー</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary);
+    display: grid; place-items: center;
+  }
+  .wrap { position: relative; width: 260px; height: 340px; }
+  .goo { position: absolute; inset: 0; filter: url(#goo); }
+  .ball {
+    position: absolute; left: 50%; bottom: 24px;
+    width: 62px; height: 62px; margin-left: -31px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: var(--color-accent-default);
+    color: var(--color-accent-fg);
+    will-change: transform;
+    transform: translate3d(0,0,0) scale(1);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--color-fg-primary) 14%, transparent);
+  }
+  /* アイコンはフィルタ外の別レイヤに置き、にじませない */
+  .icons { position: absolute; inset: 0; pointer-events: none; }
+  .icon {
+    position: absolute; left: 50%; bottom: 24px; width: 62px; height: 62px; margin-left: -31px;
+    display: grid; place-items: center; will-change: transform, opacity;
+    color: var(--color-accent-fg);
+  }
+  .icon svg { width: 26px; height: 26px; }
+  .fab {
+    position: absolute; left: 50%; bottom: 24px; width: 62px; height: 62px; margin-left: -31px;
+    border-radius: 50%; border: none; background: transparent; cursor: pointer;
+    display: grid; place-items: center; color: var(--color-accent-fg); z-index: 3;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  }
+  .fab svg { width: 28px; height: 28px; transition: transform .45s cubic-bezier(.34,1.56,.64,1); }
+  .fab.open svg { transform: rotate(135deg); }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <svg width="0" height="0" style="position:absolute">
+    <defs>
+      <filter id="goo">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="9" result="blur"/>
+        <feColorMatrix in="blur" mode="matrix"
+          values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -11" result="goo"/>
+        <feBlend in="SourceGraphic" in2="goo"/>
+      </filter>
+    </defs>
+  </svg>
+  <div class="goo" id="goo"></div>
+  <div class="icons" id="icons"></div>
+  <button class="fab" id="fab" aria-label="メニューを開く">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+      <path d="M12 5v14M5 12h14"/></svg>
+  </button>
+</div>
+<div class="hint">＋ を押すとメニュー玉がにゅるっと分裂・融合する</div>
+<script>
+(() => {
+"use strict";
+const gooLayer = document.getElementById("goo");
+const iconLayer = document.getElementById("icons");
+const fab = document.getElementById("fab");
+
+const ICONS = [
+  '<path d="M12 3l2.5 6H21l-5 4 2 7-6-4-6 4 2-7-5-4h6.5z"/>',       // star
+  '<path d="M12 21s-7-4.7-9.3-9C1 8.5 3 5 6.5 5 9 5 12 8 12 8s3-3 5.5-3C21 5 23 8.5 21.3 12 19 16.3 12 21 12 21z"/>', // heart
+  '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>', // sun
+  '<path d="M4 7h16M4 12h16M4 17h10"/>',                              // list
+  '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',                        // download
+];
+const N = ICONS.length;
+const R = 108;                       // 展開半径
+const spread = Math.PI * 0.9;        // 扇の角度
+const a0 = Math.PI/2 + spread/2, a1 = Math.PI/2 - spread/2;
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change",(e)=>{ reduced = e.matches; });
+
+// 各玉の目標／現在（ばね）
+const balls = [];
+for (let k=0;k<N;k++){
+  const t = N===1?0.5:k/(N-1);
+  const ang = a0 + (a1-a0)*t;
+  const tx = Math.cos(ang)*R, ty = -Math.sin(ang)*R; // 上方向へ
+  const ball = document.createElement("div"); ball.className="ball";
+  gooLayer.appendChild(ball);
+  const icon = document.createElement("div"); icon.className="icon";
+  icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>`;
+  iconLayer.appendChild(icon);
+  balls.push({ ball, icon, tx, ty, x:0, y:0, vx:0, vy:0, delay:k*0.045, phase:0 });
+}
+
+let open = false, animating = false;
+function toggle(){
+  open = !open;
+  fab.classList.toggle("open", open);
+  fab.setAttribute("aria-label", open?"メニューを閉じる":"メニューを開く");
+  if (reduced){
+    for (const b of balls){ b.x=open?b.tx:0; b.y=open?b.ty:0; b.vx=b.vy=0; apply(b,open?1:0); }
+    return;
+  }
+  animating = true;
+}
+fab.addEventListener("click", toggle);
+
+// ばね定数（開くとき弾む・閉じるときスッと吸い込む）
+const K_OPEN = 210, K_CLOSE = 150, DAMP = 15;
+function apply(b, prog){
+  const s = 0.35 + 0.65*prog;                    // 融合中は小さく＝にゅるっと伸びる見え
+  b.ball.style.transform = `translate3d(${b.x}px,${b.y}px,0) scale(${s})`;
+  const ic = 0.55 + 0.45*prog;
+  b.icon.style.transform = `translate3d(${b.x}px,${b.y}px,0) scale(${ic})`;
+  b.icon.style.opacity = String(Math.max(0, prog*1.4-0.4));
+}
+
+let last = performance.now();
+function frame(now){
+  let dt=(now-last)/1000; last=now; if (dt>0.05) dt=0.05;
+  if (animating || balls.some(b=>Math.abs(b.vx)+Math.abs(b.vy)>0.5)){
+    let settled = true;
+    for (const b of balls){
+      const gx = open?b.tx:0, gy = open?b.ty:0;
+      const k = open?K_OPEN:K_CLOSE;
+      const ax = k*(gx-b.x) - DAMP*b.vx;
+      const ay = k*(gy-b.y) - DAMP*b.vy;
+      b.vx += ax*dt; b.vy += ay*dt;
+      b.x += b.vx*dt; b.y += b.vy*dt;
+      const prog = Math.min(1, Math.hypot(b.x,b.y)/Math.max(1,Math.hypot(b.tx,b.ty)));
+      apply(b, open?prog:prog);
+      if (Math.abs(gx-b.x)+Math.abs(gy-b.y) > 0.4 || Math.abs(b.vx)+Math.abs(b.vy)>0.4) settled=false;
+    }
+    if (settled) animating=false;
+  }
+  requestAnimationFrame(frame);
+}
+// 初期状態
+for (const b of balls) apply(b,0);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

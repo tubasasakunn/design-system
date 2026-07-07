@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="立方体カルーセル">
+<meta name="pattern-desc" content="慣性とばねスナップで回る CSS 3D の八角カルーセル。正面に来たパネルだけが、ふわりと明るく浮き上がる。">
+<title>立方体カルーセル</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(120% 90% at 50% 30%,
+      var(--color-bg-primary),
+      color-mix(in srgb, var(--color-bg-secondary) 85%, var(--color-bg-primary)));
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    display: grid; place-items: center;
+    touch-action: none;
+    user-select: none; -webkit-user-select: none;
+    cursor: grab;
+  }
+  body.dragging { cursor: grabbing; }
+  .stage {
+    perspective: 1300px;
+    width: min(90vw, 720px); height: min(64dvh, 480px);
+    display: grid; place-items: center;
+  }
+  .ring {
+    position: relative; width: 0; height: 0;
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+  .panel {
+    position: absolute; left: 0; top: 0;
+    width: 250px; height: 330px;
+    margin: -165px 0 0 -125px;
+    border-radius: 22px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    display: flex; flex-direction: column; justify-content: space-between;
+    padding: 22px;
+    backface-visibility: hidden;
+    will-change: transform, filter, opacity;
+    box-shadow: 0 18px 40px -18px rgba(40, 35, 25, .28);
+  }
+  .panel .chip {
+    align-self: flex-start;
+    font-size: .68rem; letter-spacing: .12em;
+    padding: .3rem .7rem; border-radius: 999px;
+    color: var(--chip-ink); background: var(--chip-bg);
+  }
+  .panel .word {
+    font-size: 2.1rem; font-weight: 650; letter-spacing: .12em;
+    color: var(--color-fg-primary);
+  }
+  .panel .yomi { font-size: .72rem; letter-spacing: .3em; color: var(--color-fg-muted); margin-top: 6px; }
+  .panel .desc { font-size: .75rem; line-height: 1.8; color: var(--color-fg-secondary); }
+  .panel .orb {
+    position: absolute; right: 20px; top: 20px;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: radial-gradient(circle at 34% 30%, var(--chip-bg), var(--chip-ink));
+    opacity: .85;
+  }
+  .floor-glow {
+    position: fixed; left: 50%; bottom: 8dvh;
+    width: min(70vw, 560px); height: 90px;
+    transform: translateX(-50%);
+    border-radius: 50%;
+    background: radial-gradient(50% 50% at 50% 50%,
+      color-mix(in srgb, var(--color-accent-default) 18%, transparent), transparent 70%);
+    pointer-events: none;
+  }
+  .dots {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    display: flex; gap: 10px; z-index: 5;
+  }
+  .dots i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--color-border-strong);
+    transition: transform .3s cubic-bezier(.34,1.56,.64,1), background .3s;
+  }
+  .dots i.on { background: var(--color-accent-default); transform: scale(1.5); }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none; z-index: 5;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<div class="stage"><div class="ring" id="ring"></div></div>
+<div class="floor-glow"></div>
+<div class="dots" id="dots"></div>
+<div class="caption">
+  <h1>立方体カルーセル</h1>
+  <p>ドラッグで勢いよく回し、手を離すと慣性で滑ってから、いちばん近い面へぽよんと吸い付きます。ホイールでも回せます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const ring = document.getElementById("ring");
+  const dotsEl = document.getElementById("dots");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // ---- パネル内容（季節の言葉 × パステル）----
+  const ITEMS = [
+    { w: "朝霧",     y: "ASAGIRI",   c: ["#9fc8ea", "#07312d"], d: "夜明けの谷に沈む、乳白色のやわらかな霧。" },
+    { w: "花筏",     y: "HANAIKADA", c: ["#f0a8bd", "#07312d"], d: "散った桜が水面を流れてゆく、春だけの筏。" },
+    { w: "木漏れ日", y: "KOMOREBI",  c: ["#a9dcc0", "#07312d"], d: "葉のあいだからこぼれ落ちる、まだらな光。" },
+    { w: "蝉時雨",   y: "SEMISHIGURE", c: ["#f1d189", "#07312d"], d: "降りしきる雨のように重なる、真夏の蝉の声。" },
+    { w: "夕凪",     y: "YUNAGI",    c: ["#f3a890", "#07312d"], d: "海風と陸風が入れ替わる夕暮れ、風の止む時間。" },
+    { w: "月白",     y: "TSUKISHIRO", c: ["#bcb2e8", "#07312d"], d: "月が昇る直前、空がしらむ一瞬の色の名前。" },
+    { w: "小春日和", y: "KOHARUBIYORI", c: ["#5bbcb1", "#07312d"], d: "冬の入り口にふと訪れる、春のように暖かな日。" },
+    { w: "雪明かり", y: "YUKIAKARI", c: ["#9fc8ea", "#07312d"], d: "積もった雪が夜をほのかに照らす、静かな明るさ。" },
+  ];
+  const N = ITEMS.length;
+  const STEP = 360 / N;
+  const R = Math.round(125 / Math.tan(Math.PI / N)) + 40;  // パネル半幅から円半径を導出
+
+  const panels = ITEMS.map((it, i) => {
+    const p = document.createElement("div");
+    p.className = "panel";
+    p.style.setProperty("--chip-bg", it.c[0]);
+    p.style.setProperty("--chip-ink", it.c[1]);
+    p.innerHTML =
+      `<span class="chip">${String(i + 1).padStart(2, "0")}</span><div class="orb"></div>` +
+      `<div><div class="word">${it.w}</div><div class="yomi">${it.y}</div></div>` +
+      `<p class="desc">${it.d}</p>`;
+    ring.appendChild(p);
+    const dot = document.createElement("i");
+    dotsEl.appendChild(dot);
+    return { el: p, base: i * STEP, dot };
+  });
+
+  // ---- 回転の物理: 慣性（指数減衰）→ 低速でばねスナップ ----
+  let angle = 0, vel = 0;          // deg, deg/s
+  let dragging = false, snapTarget = null, idleT = 0, autospin = false;
+
+  function apply() {
+    ring.style.transform = `translateZ(${-R}px) rotateY(${angle}deg)`;
+    let frontIdx = 0, best = -2;
+    for (const p of panels) {
+      // 各パネルの「正面度」= cos(パネル角 + リング角)
+      const rad = ((p.base + angle) * Math.PI) / 180;
+      const facing = Math.cos(rad);
+      if (facing > best) { best = facing; frontIdx = panels.indexOf(p); }
+      const lift = Math.max(0, (facing - 0.82) / 0.18);   // 正面付近だけ 0→1
+      const dim = 0.42 + 0.58 * Math.max(0, facing * 0.5 + 0.5);
+      p.el.style.transform =
+        `rotateY(${p.base}deg) translateZ(${R + lift * 46}px) scale(${1 + lift * 0.05})`;
+      p.el.style.opacity = (0.25 + 0.75 * Math.max(0.12, facing * 0.5 + 0.5)).toFixed(3);
+      p.el.style.filter = `brightness(${(0.86 + lift * 0.14 + (dim - 0.42) * 0.14).toFixed(3)})`;
+      p.el.style.boxShadow = `0 ${18 + lift * 14}px ${40 + lift * 26}px ${-18 - lift * 4}px rgba(40,35,25,${0.18 + lift * 0.16})`;
+    }
+    panels.forEach((p, i) => p.dot.classList.toggle("on", i === frontIdx));
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+
+    if (!dragging) {
+      if (autospin) {
+        angle -= 12 * dt;                            // 待機中のゆるやかな回遊
+      } else if (snapTarget === null) {
+        angle += vel * dt;
+        vel *= Math.exp(-dt * 2.1);                  // 慣性の指数減衰
+        if (Math.abs(vel) < 60) snapTarget = Math.round(angle / STEP) * STEP;
+      } else {
+        // 目標の面へ臨界減衰ばね（ぽよっと 1 回だけ揺れる程度）
+        const k = 90, c = 15;
+        vel += (k * (snapTarget - angle) - c * vel) * dt;
+        angle += vel * dt;
+        if (Math.abs(snapTarget - angle) < 0.02 && Math.abs(vel) < 0.5) {
+          angle = snapTarget; vel = 0;
+          idleT += dt;
+          if (!rm.matches && idleT > 7) autospin = true;  // 長く触れないと回遊（reduce では無し）
+        }
+      }
+    }
+    apply();
+    requestAnimationFrame(frame);
+  }
+  const wake = () => { autospin = false; idleT = 0; };
+
+  // ---- 入力（pointer events: マウス / タッチ共通）----
+  let px = 0, samples = [];
+  addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".caption")) return;
+    wake();
+    dragging = true; snapTarget = null;
+    px = e.clientX; vel = 0; samples = [];
+    document.body.classList.add("dragging");
+  });
+  addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - px; px = e.clientX;
+    angle += dx * 0.30;                             // 1px = 0.3deg
+    samples.push({ t: performance.now(), dx });
+    while (samples.length && performance.now() - samples[0].t > 90) samples.shift();
+  });
+  const release = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("dragging");
+    // 直近 90ms の移動量から角速度を推定（フリック）
+    const span = samples.length > 1 ? samples[samples.length - 1].t - samples[0].t : 0;
+    const sum = samples.reduce((s, m) => s + m.dx, 0);
+    vel = span > 0 ? (sum * 0.30) / (span / 1000) : 0;
+    vel = Math.max(-900, Math.min(900, vel));
+    snapTarget = Math.abs(vel) < 60 ? Math.round(angle / STEP) * STEP : null;
+  };
+  addEventListener("pointerup", release);
+  addEventListener("pointercancel", release);
+  addEventListener("wheel", (e) => {
+    e.preventDefault();
+    wake();
+    snapTarget = null;
+    vel += (e.deltaY + e.deltaX) * -0.9;
+    vel = Math.max(-900, Math.min(900, vel));
+  }, { passive: false });
+  addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    wake();
+    const base = snapTarget ?? Math.round(angle / STEP) * STEP;
+    snapTarget = base + (e.key === "ArrowLeft" ? STEP : -STEP);
+  });
+
+  apply();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

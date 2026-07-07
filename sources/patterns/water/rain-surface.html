@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="雨の水面">
+<meta name="pattern-desc" content="雨粒が水面を叩き、飛沫と波紋が生まれて干渉し合うばね連成の水面シミュレーション。">
+<title>雨の水面</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 280px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  .panel {
+    position: fixed; right: 24px; bottom: 24px;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 18px; border-radius: 999px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+  }
+  .panel label { font-size: .78rem; color: var(--color-fg-secondary); white-space: nowrap; }
+  .panel input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 140px; height: 4px; border-radius: 999px;
+    background: var(--color-border-strong); outline: none; cursor: pointer;
+  }
+  .panel input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--color-accent-default);
+    border: 2px solid var(--color-bg-elevated);
+    box-shadow: 0 1px 4px rgba(20, 40, 38, .25);
+  }
+  .panel input[type="range"]::-moz-range-thumb {
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--color-accent-default);
+    border: 2px solid var(--color-bg-elevated);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>雨の水面</h1>
+  <p>雨粒が水面を叩き、波紋が走って干渉します。水面をなでても波が立ちます。</p>
+</div>
+<div class="panel">
+  <label for="rain">雨量</label>
+  <input id="rain" type="range" min="0" max="100" value="42" aria-label="雨量">
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const slider = document.getElementById("rain");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const mix = (a, b, t) => [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+  const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+  let skyTop, skyLow, waterHi, waterLo, lineCol, dropCol, splashCol;
+  function readColors() {
+    const bg = hex(token("--color-bg-primary", "#faf7f1"));
+    const bg2 = hex(token("--color-bg-secondary", "#f1ece2"));
+    const elevated = hex(token("--color-bg-elevated", "#fffdf9"));
+    const accent = hex(token("--color-accent-default", "#5bbcb1"));
+    const deep = hex(token("--color-accent-fg", "#07312d"));
+    const fg2 = hex(token("--color-fg-secondary", "#6c655b"));
+    skyTop = bg;
+    skyLow = mix(bg2, accent, 0.10);
+    waterHi = mix(bg, accent, 0.45);
+    waterLo = mix(accent, deep, 0.55);
+    lineCol = mix(elevated, accent, 0.20);
+    dropCol = mix(fg2, accent, 0.55);
+    splashCol = mix(elevated, accent, 0.30);
+  }
+
+  // ---- ばね連成の 1 次元水面 ----
+  const DX = 3;                 // 列間隔 (css px)
+  const K = 0.022;              // ばね定数
+  const DAMP = 0.985;           // 減衰
+  const SPREAD = 0.14;          // 伝播係数
+  let W = 0, H = 0, N = 0, surfY = 0;
+  let hgt = new Float32Array(0), vel = new Float32Array(0);
+  let ld = new Float32Array(0), rd = new Float32Array(0);
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    surfY = H * 0.6;
+    N = Math.ceil(W / DX) + 2;
+    hgt = new Float32Array(N);
+    vel = new Float32Array(N);
+    ld = new Float32Array(N);
+    rd = new Float32Array(N);
+  }
+
+  function stepWater() {
+    for (let i = 0; i < N; i++) {
+      vel[i] += -K * hgt[i];
+      vel[i] *= DAMP;
+      hgt[i] += vel[i];
+    }
+    for (let p = 0; p < 3; p++) {           // 隣へ波を伝える（干渉の源）
+      for (let i = 0; i < N; i++) {
+        if (i > 0) { ld[i] = SPREAD * (hgt[i] - hgt[i - 1]); vel[i - 1] += ld[i]; }
+        if (i < N - 1) { rd[i] = SPREAD * (hgt[i] - hgt[i + 1]); vel[i + 1] += rd[i]; }
+      }
+      for (let i = 0; i < N; i++) {
+        if (i > 0) hgt[i - 1] += ld[i];
+        if (i < N - 1) hgt[i + 1] += rd[i];
+      }
+    }
+  }
+
+  // ---- 雨粒と飛沫 ----
+  const drops = [];    // {x, y, vy, wind}
+  const splash = [];   // {x, y, vx, vy, life, r}
+  function spawnDrop(x) {
+    drops.push({ x, y: -24, vy: 620 + Math.random() * 380, wind: (Math.random() - 0.5) * 24 });
+  }
+  function impact(x, power) {
+    const i = Math.max(1, Math.min(N - 2, Math.round(x / DX)));
+    vel[i] -= power;                              // 水面を押し込む → 波紋
+    vel[i - 1] -= power * 0.45;
+    vel[i + 1] -= power * 0.45;
+    const n = 3 + (Math.random() * 4 | 0);        // 小さな飛沫
+    for (let k = 0; k < n; k++) {
+      splash.push({
+        x, y: surfY + hgt[i],
+        vx: (Math.random() - 0.5) * 170,
+        vy: -(120 + Math.random() * 260) * Math.sqrt(power / 5),
+        life: 0.55 + Math.random() * 0.35,
+        r: 1 + Math.random() * 1.6,
+      });
+    }
+  }
+
+  // ---- 入力: 水面をなでる / 叩く ----
+  let pressed = false, lastPX = 0;
+  canvas.addEventListener("pointerdown", (e) => {
+    pressed = true; lastPX = e.clientX;
+    canvas.setPointerCapture(e.pointerId);
+    if (e.clientY > surfY - 60) impact(e.clientX, 7);
+    else spawnDrop(e.clientX);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!pressed) return;
+    if (e.clientY > surfY - 60) {
+      const d = Math.min(24, Math.abs(e.clientX - lastPX));
+      impact(e.clientX, 1.2 + d * 0.12);
+    }
+    lastPX = e.clientX;
+  });
+  const up = () => { pressed = false; };
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
+
+  // ---- 描画 ----
+  function render() {
+    const sky = ctx.createLinearGradient(0, 0, 0, surfY);
+    sky.addColorStop(0, rgb(skyTop));
+    sky.addColorStop(1, rgb(skyLow));
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, surfY + 40);
+
+    // 水体（表面の高さに沿って塗る）
+    const wtr = ctx.createLinearGradient(0, surfY - 30, 0, H);
+    wtr.addColorStop(0, rgb(waterHi));
+    wtr.addColorStop(1, rgb(waterLo));
+    ctx.fillStyle = wtr;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    ctx.lineTo(0, surfY + hgt[0]);
+    for (let i = 1; i < N; i++) ctx.lineTo(i * DX, surfY + hgt[i]);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    // 表面のハイライト線（傾きが急なほど明るく）
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = rgb(lineCol, 0.85);
+    ctx.beginPath();
+    ctx.moveTo(0, surfY + hgt[0]);
+    for (let i = 1; i < N; i++) ctx.lineTo(i * DX, surfY + hgt[i]);
+    ctx.stroke();
+
+    // 雨粒（速度に応じた短い筋）
+    ctx.strokeStyle = rgb(dropCol, 0.6);
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    for (const d of drops) {
+      const len = d.vy * 0.022;
+      ctx.moveTo(d.x - d.wind * 0.02 * len, d.y - len);
+      ctx.lineTo(d.x, d.y);
+    }
+    ctx.stroke();
+
+    // 飛沫
+    for (const s of splash) {
+      ctx.globalAlpha = Math.max(0, s.life) * 1.4;
+      ctx.fillStyle = rgb(splashCol);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, 6.2832);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- メインループ ----
+  let last = performance.now(), acc = 0, rainAcc = 0;
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;
+
+    // 雨の生成（reduce では自動降雨を止める。操作起点の波のみ）
+    const rate = rm.matches ? 0 : (Number(slider.value) / 100) * 26;
+    rainAcc += dt * rate;
+    while (rainAcc >= 1) { spawnDrop(Math.random() * W); rainAcc -= 1; }
+
+    // 固定ステップで水面を更新
+    acc += dt;
+    const STEP = 1 / 60;
+    let n = 0;
+    while (acc >= STEP && n < 4) { stepWater(); acc -= STEP; n++; }
+    if (acc >= STEP) acc = 0;
+
+    // 雨粒の落下と着水
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      d.vy += 1500 * dt;
+      d.y += d.vy * dt;
+      d.x += d.wind * dt;
+      const idx = Math.max(0, Math.min(N - 1, Math.round(d.x / DX)));
+      if (d.y >= surfY + hgt[idx]) {
+        impact(d.x, 2.6 + d.vy * 0.0035);
+        drops.splice(i, 1);
+      }
+    }
+    // 飛沫の放物運動
+    for (let i = splash.length - 1; i >= 0; i--) {
+      const s = splash[i];
+      s.vy += 1250 * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.life -= dt;
+      if (s.life <= 0 || s.y > surfY + 60) splash.splice(i, 1);
+    }
+
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

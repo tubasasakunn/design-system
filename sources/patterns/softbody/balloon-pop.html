@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ふくらむ風船">
+<meta name="pattern-desc" content="ポンプ連打で風船が膨らみ、張り詰めるほど震え、限界で弾けて破片が飛び散る。何度でも再挑戦。">
+<title>ふくらむ風船</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .ui {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 12px; align-items: center;
+  }
+  button {
+    font-family: inherit; font-size: .92rem; font-weight: 600; cursor: pointer;
+    border-radius: 999px; padding: .7rem 1.5rem; border: 1px solid var(--color-border-strong);
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+    transition: transform .12s ease;
+  }
+  button:active { transform: scale(.94); }
+  .pump { background: var(--color-accent-default); color: var(--color-accent-fg); border-color: transparent; }
+  .reset { background: var(--color-bg-elevated); color: var(--color-fg-secondary); }
+  .gauge {
+    position: fixed; top: 84px; left: 50%; transform: translateX(-50%);
+    width: 180px; height: 8px; border-radius: 999px;
+    background: color-mix(in srgb, var(--color-fg-muted) 25%, transparent); overflow: hidden;
+  }
+  .gauge > span { display: block; height: 100%; width: 0%; border-radius: 999px;
+    background: var(--color-status-success); transition: width .18s ease, background .3s ease; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="gauge"><span id="gaugeFill"></span></div>
+<div class="ui">
+  <button class="pump" id="pump">ポンプ（連打）</button>
+  <button class="reset" id="reset">もう一度</button>
+</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const gaugeFill = document.getElementById("gaugeFill");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h=h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c);
+  const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const rgba=(c,a)=>`rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const C={};
+const refresh=()=>{
+  C.acc  = hexRgb(token("--color-accent-default","#5bbcb1"));
+  C.accH = hexRgb(token("--color-accent-hover","#46a89d"));
+  C.hi   = hexRgb(token("--color-bg-elevated","#fffdf9"));
+  C.ink  = hexRgb(token("--color-fg-primary","#2c2a26"));
+  C.warn = hexRgb(token("--color-status-warning","#f0a830"));
+  C.err  = hexRgb(token("--color-status-error","#ef5b5b"));
+  C.ok   = hexRgb(token("--color-status-success","#2fae6e"));
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme","data-appearance"]});
+
+let W=0,H=0,dpr=1;
+const resize=()=>{ dpr=Math.min(2,window.devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); };
+addEventListener("resize",resize); resize();
+
+const rmq=matchMedia("(prefers-reduced-motion: reduce)");
+let reduced=rmq.matches; rmq.addEventListener?.("change",e=>reduced=e.matches);
+
+// ---- 状態 ----
+const R_MIN=26;
+const rand=(a,b)=>a+Math.random()*(b-a);
+let balloon, shards=[], confetti=[];
+function reset(){
+  balloon = {
+    r:R_MIN, tr:R_MIN,          // 現在半径・目標半径（ばねで追う）
+    v:0, wob:0, wobV:0,         // 半径ばね速度・ふるえ位相/速度
+    limit: rand(0.86,0.98),     // 限界の個体差
+    fill:0,                     // 0..1 の張り具合
+    alive:true, sx:0, sy:0,     // 揺れオフセット
+  };
+  shards=[]; confetti=[];
+}
+reset();
+
+function limitR(){ return Math.min(W,H)*0.34; }
+
+function pump(){
+  if (!balloon.alive){ reset(); return; }
+  const span = limitR()-R_MIN;
+  balloon.tr += span*0.09 + 6;      // 1回ぶんの空気
+  balloon.wobV += 5.5;              // ポンプの衝撃で震える
+}
+function burst(){
+  balloon.alive=false;
+  gaugeFill.style.width="0%";
+  const cx=W/2+balloon.sx, cy=H*0.46+balloon.sy, r=balloon.r;
+  // ゴム片（弧を描いて飛ぶ）
+  const n=26;
+  for (let i=0;i<n;i++){
+    const a=rand(0,Math.PI*2), sp=rand(120,420);
+    shards.push({ x:cx+Math.cos(a)*r*0.6, y:cy+Math.sin(a)*r*0.6,
+      vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-rand(40,120),
+      rot:rand(0,Math.PI*2), rv:rand(-8,8), len:rand(8,20), life:1 });
+  }
+  // 紙吹雪（彩り）
+  const cols=[[91,188,177],[240,168,189],[241,209,137],[188,178,232],[243,168,144],[159,200,234],[169,220,192]];
+  for (let i=0;i<44;i++){
+    const a=rand(0,Math.PI*2), sp=rand(80,360);
+    confetti.push({ x:cx,y:cy, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-rand(60,180),
+      s:rand(4,8), rot:rand(0,6.28), rv:rand(-10,10), col:cols[(Math.random()*cols.length)|0], life:1 });
+  }
+}
+
+document.getElementById("pump").addEventListener("click",pump);
+document.getElementById("reset").addEventListener("click",reset);
+canvas.addEventListener("pointerdown",()=>{ if (!balloon.alive) reset(); else pump(); });
+
+// ---- 描画 ----
+function drawBalloon(){
+  const b=balloon; const cx=W/2+b.sx, cy=H*0.46+b.sy, r=b.r;
+  // 縦長のしずく形。膨らむほど縦横比が球へ近づく
+  const aspect = 1.18 - b.fill*0.12;
+  ctx.save(); ctx.translate(cx,cy);
+  // 糸
+  ctx.beginPath(); ctx.moveTo(0, r*aspect);
+  ctx.quadraticCurveTo(Math.sin(performance.now()/500)*10, r*aspect+42, 0, r*aspect+80);
+  ctx.strokeStyle=rgba(C.ink,0.35); ctx.lineWidth=1.4; ctx.stroke();
+  // 結び目
+  ctx.beginPath(); ctx.moveTo(-5,r*aspect); ctx.lineTo(5,r*aspect); ctx.lineTo(0,r*aspect+8); ctx.closePath();
+  // 本体（限界に近づくほど赤へ寄る）
+  const t=b.fill;
+  const col=[
+    Math.round(C.acc[0]+(C.err[0]-C.acc[0])*Math.max(0,t-0.4)/0.6),
+    Math.round(C.acc[1]+(C.err[1]-C.acc[1])*Math.max(0,t-0.4)/0.6),
+    Math.round(C.acc[2]+(C.err[2]-C.acc[2])*Math.max(0,t-0.4)/0.6),
+  ];
+  ctx.fillStyle=rgba(col,0.95); ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(0,0,r,r*aspect,0,0,Math.PI*2);
+  const g=ctx.createRadialGradient(-r*0.32,-r*0.4,r*0.1,0,0,r*1.2);
+  g.addColorStop(0,rgba(C.hi,0.85)); g.addColorStop(0.35,rgba(col,0.98)); g.addColorStop(1,rgba(col,1));
+  ctx.fillStyle=g; ctx.fill();
+  // ハイライト
+  ctx.beginPath(); ctx.ellipse(-r*0.34,-r*0.42,r*0.16,r*0.26,-0.5,0,Math.PI*2);
+  ctx.fillStyle=rgba(C.hi,0.7); ctx.fill();
+  ctx.restore();
+}
+
+function frame(now){
+  let dt=(now-last)/1000; last=now; if (dt>0.05) dt=0.05;
+  ctx.clearRect(0,0,W,H);
+  const b=balloon;
+  if (b.alive){
+    // 半径ばね
+    const k=90, d=14;
+    b.v += (k*(b.tr-b.r) - d*b.v)*dt; b.r += b.v*dt;
+    b.fill = Math.min(1.2, (b.r-R_MIN)/(limitR()-R_MIN));
+    // 震え：張るほど大きく・速く。ばね減衰で自然に収まる
+    if (!reduced){
+      const stress=Math.max(0,b.fill-0.35);
+      b.wobV += (-40*b.wob - 6*b.wobV)*dt;
+      b.wob  += b.wobV*dt;
+      const amp = (0.6+stress*6);
+      b.sx = Math.sin(now/70)*amp*stress + b.wob*4;
+      b.sy = Math.cos(now/61)*amp*stress;
+      // 限界近くの微細な脈動
+      b.r += Math.sin(now/45)*stress*stress*1.4;
+    } else { b.sx=b.sy=0; }
+    // ゲージ
+    const pct=Math.min(100, b.fill/b.limit*100);
+    gaugeFill.style.width=pct.toFixed(0)+"%";
+    gaugeFill.style.background = pct>80? rgba(C.err,1) : pct>55? rgba(C.warn,1) : rgba(C.ok,1);
+    // 破裂判定
+    if (b.fill>=b.limit) burst();
+    else drawBalloon();
+  }
+  // 破片
+  for (const s of shards){
+    s.vy += 900*dt; s.vx*=0.99; s.x+=s.vx*dt; s.y+=s.vy*dt; s.rot+=s.rv*dt; s.life-=dt*0.5;
+    if (s.life<=0) continue;
+    ctx.save(); ctx.translate(s.x,s.y); ctx.rotate(s.rot);
+    ctx.strokeStyle=rgba(C.err,Math.max(0,s.life)); ctx.lineWidth=3; ctx.lineCap="round";
+    ctx.beginPath(); ctx.moveTo(-s.len/2,0); ctx.quadraticCurveTo(0,-6,s.len/2,0); ctx.stroke();
+    ctx.restore();
+  }
+  shards=shards.filter(s=>s.life>0 && s.y<H+40);
+  // 紙吹雪
+  for (const c of confetti){
+    c.vy += 620*dt; c.vx*=0.985; c.x+=c.vx*dt; c.y+=c.vy*dt; c.rot+=c.rv*dt; c.life-=dt*0.32;
+    if (c.life<=0) continue;
+    ctx.save(); ctx.translate(c.x,c.y); ctx.rotate(c.rot);
+    ctx.globalAlpha=Math.max(0,Math.min(1,c.life));
+    ctx.fillStyle=`rgb(${c.col[0]},${c.col[1]},${c.col[2]})`;
+    ctx.fillRect(-c.s/2,-c.s/2,c.s,c.s*0.6);
+    ctx.restore();
+  }
+  ctx.globalAlpha=1;
+  confetti=confetti.filter(c=>c.life>0 && c.y<H+40);
+
+  // 破裂後の案内
+  if (!b.alive && shards.length===0){
+    ctx.fillStyle=rgba(C.ink,0.55); ctx.font="600 15px system-ui"; ctx.textAlign="center";
+    ctx.fillText("パン！ もう一度ふくらませてみて", W/2, H*0.46);
+  }
+  requestAnimationFrame(frame);
+}
+let last=performance.now();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

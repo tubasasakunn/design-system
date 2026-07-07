@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>磁性文字</title>
+<meta name="pattern-title" content="磁性文字">
+<meta name="pattern-desc" content="文字がカーソルに引き寄せられ、近づきすぎると逃げ、ばねで元の位置へ戻る。文字どうしも少し反発する。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid; place-items: center;
+    height: 100dvh;
+    touch-action: none;
+  }
+  #stage { text-align: center; padding: 1.2rem; user-select: none; }
+  .line { display: block; font-weight: 800; line-height: 1.12; white-space: nowrap; }
+  .line.big { font-size: clamp(2.6rem, 13vw, 6.4rem); letter-spacing: .01em; }
+  .line.sub {
+    font-size: clamp(.86rem, 3.2vw, 1.2rem);
+    font-weight: 600; letter-spacing: .16em;
+    color: var(--color-fg-secondary);
+    margin-top: 1rem;
+  }
+  .ch { display: inline-block; will-change: transform; }
+  .ch.space { width: .32em; }
+  #hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    padding: .5rem 1.1rem; border-radius: 999px;
+    font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-muted);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <span class="line big">磁 力 の 文 字</span>
+  <span class="line sub">カーソルに 寄り、逃げ、戻る</span>
+</div>
+<div id="hint">カーソル / 指を 近づけてみる</div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const lines = [...document.querySelectorAll(".line")];
+  const chars = [];
+
+  // 文字を span 化。物理は displacement（home からのずれ）で扱う
+  for (const line of lines) {
+    const text = line.textContent;
+    line.textContent = "";
+    for (const chr of [...text]) {
+      const span = document.createElement("span");
+      span.className = "ch";
+      if (chr === " " || chr === "　") { span.classList.add("space"); line.appendChild(span); continue; }
+      span.textContent = chr;
+      line.appendChild(span);
+      chars.push({ el: span, hx: 0, hy: 0, x: 0, y: 0, vx: 0, vy: 0, w: 0 });
+    }
+  }
+
+  // home 位置（画面座標での中心）を測る
+  function measure() {
+    for (const c of chars) {
+      const prev = c.el.style.transform;
+      c.el.style.transform = "none";
+      const r = c.el.getBoundingClientRect();
+      c.hx = r.left + r.width / 2;
+      c.hy = r.top + r.height / 2;
+      c.w = r.width;
+      c.el.style.transform = prev;
+    }
+  }
+  window.addEventListener("resize", () => { measure(); });
+
+  // ポインタ
+  const P = { x: -9999, y: -9999, active: false };
+  function move(e) { P.x = e.clientX; P.y = e.clientY; P.active = true; }
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerdown", move);
+  window.addEventListener("pointerup", () => { /* 位置は保持、引力は移動で更新 */ });
+  window.addEventListener("pointerleave", () => { P.active = false; });
+  window.addEventListener("blur", () => { P.active = false; });
+
+  // パラメータ
+  const R_FIELD = 200;   // 磁場の届く半径
+  const R_FLEE = 64;     // これより近いと逃げる
+  const PULL = 3400;     // 引力係数
+  const PUSH = 5200;     // 反発係数（近距離）
+  const K_SPRING = 150;  // home へ戻すばね定数
+  const DAMP = 8.5;      // 速度減衰
+  const REPEL_CHAR = 900;// 文字間反発
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.033) dt = 0.033;
+
+    for (const c of chars) {
+      // 現在の絶対位置
+      const px = c.hx + c.x, py = c.hy + c.y;
+      let ax = 0, ay = 0;
+
+      // ばね: home へ戻す
+      ax += -K_SPRING * c.x;
+      ay += -K_SPRING * c.y;
+
+      // ポインタとの相互作用
+      if (P.active) {
+        let dx = P.x - px, dy = P.y - py;
+        const d = Math.hypot(dx, dy) || 0.0001;
+        const ux = dx / d, uy = dy / d;
+        if (d < R_FLEE) {
+          // 近すぎ: 逃げる（距離が近いほど強く、押し返す）
+          const f = PUSH * (1 - d / R_FLEE);
+          ax -= ux * f; ay -= uy * f;
+        } else if (d < R_FIELD) {
+          // 磁場内: 引き寄せる（中間距離で最大の滑らかな山）
+          const t = (d - R_FLEE) / (R_FIELD - R_FLEE); // 0..1
+          const falloff = Math.sin(Math.PI * t);        // 端で 0、中央で最大
+          const f = PULL * falloff;
+          ax += ux * f; ay += uy * f;
+        }
+      }
+
+      // 文字間の弱い反発（重なりを避けて塊にならないよう）
+      for (const o of chars) {
+        if (o === c) continue;
+        const ox = (o.hx + o.x) - px, oy = (o.hy + o.y) - py;
+        const od = Math.hypot(ox, oy);
+        const minD = (c.w + o.w) * 0.62 + 6;
+        if (od > 0.001 && od < minD) {
+          const f = REPEL_CHAR * (1 - od / minD) / od;
+          ax -= ox * f; ay -= oy * f;
+        }
+      }
+
+      // 速度・位置の更新 + 減衰
+      c.vx += ax * dt; c.vy += ay * dt;
+      const damp = Math.exp(-DAMP * dt);
+      c.vx *= damp; c.vy *= damp;
+      c.x += c.vx * dt; c.y += c.vy * dt;
+    }
+
+    for (const c of chars) {
+      const speed = Math.hypot(c.vx, c.vy);
+      const rot = Math.max(-14, Math.min(14, c.vx * 0.02));
+      const sc = 1 + Math.min(0.22, speed * 0.00035);
+      c.el.style.transform =
+        "translate(" + c.x.toFixed(2) + "px," + c.y.toFixed(2) + "px) rotate(" + rot.toFixed(2) + "deg) scale(" + sc.toFixed(3) + ")";
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  function staticPose() { for (const c of chars) c.el.style.transform = "none"; }
+
+  // レイアウト確定後に計測
+  requestAnimationFrame(() => {
+    measure();
+    if (reduce.matches) { staticPose(); return; }
+    last = performance.now();
+    requestAnimationFrame(frame);
+  });
+  reduce.addEventListener?.("change", () => { if (reduce.matches) staticPose(); });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="描かれる道">
+<meta name="pattern-desc" content="スクロールに応じて曲がりくねった道が線で描かれ、木々や道標、旅の終わりの家が順に現れていく。">
+<title>描かれる道</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--color-bg-primary); color: var(--color-fg-primary); font-family: system-ui, sans-serif; }
+  .track { height: 560vh; }
+  .stage { position: fixed; inset: 0; overflow: hidden; }
+  svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  /* 背景の丘 */
+  .hill { fill: color-mix(in srgb, var(--color-bg-secondary) 88%, var(--color-accent-default)); opacity: .5; }
+  .hill2 { fill: color-mix(in srgb, var(--color-bg-secondary) 94%, var(--color-accent-default)); opacity: .4; }
+
+  .road-bg { fill: none; stroke: var(--color-bg-secondary); stroke-width: 26; stroke-linecap: round; stroke-linejoin: round; }
+  .road { fill: none; stroke: var(--color-border-strong); stroke-width: 26; stroke-linecap: round; stroke-linejoin: round; opacity: .55; }
+  .center { fill: none; stroke: var(--color-accent-default); stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 2 16; }
+
+  .marker { opacity: 0; transform-box: fill-box; transform-origin: 50% 100%; will-change: transform, opacity; }
+  .tree .trunk { fill: color-mix(in srgb, var(--color-fg-primary) 70%, var(--color-accent-fg)); }
+  .post { stroke: color-mix(in srgb, var(--color-fg-primary) 60%, var(--color-accent-fg)); stroke-width: 3; stroke-linecap: round; }
+  .sign { fill: var(--color-accent-default); }
+  .sign-t { fill: var(--color-accent-fg); font: 600 11px system-ui; }
+  .house-wall { fill: var(--color-bg-elevated); stroke: var(--color-border-strong); stroke-width: 2; }
+  .house-roof { fill: var(--color-accent-default); }
+  .house-door { fill: var(--color-accent-fg); }
+  .win { fill: color-mix(in srgb, var(--color-status-warning) 70%, var(--color-bg-elevated)); }
+  .traveler { fill: var(--color-accent-default); stroke: var(--color-accent-fg); stroke-width: 1.5; }
+
+  .head { position: fixed; left: 7vw; top: 7vh; z-index: 4; pointer-events: none; }
+  .head h1 { font-size: 1.02rem; font-weight: 600; letter-spacing: .12em; }
+  .head p { margin-top: 6px; font-size: .76rem; letter-spacing: .1em; color: var(--color-fg-muted); }
+  .meter { position: fixed; right: 26px; top: 50%; transform: translateY(-50%); width: 2px; height: 34vh; border-radius: 2px; background: var(--color-border-default); z-index: 4; pointer-events: none; }
+  .meter i { position: absolute; left: 0; top: 0; width: 100%; border-radius: 2px; background: var(--color-accent-default); }
+  .stop { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); z-index: 4; pointer-events: none; font-size: .8rem; letter-spacing: .16em; padding: 8px 18px; border-radius: 999px; background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent); border: 1px solid var(--color-border-default); backdrop-filter: blur(8px); color: var(--color-fg-secondary); opacity: 0; transition: opacity .5s; }
+</style>
+</head>
+<body>
+<div class="track" aria-hidden="true"></div>
+<div class="stage">
+  <svg id="svg" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <!-- 描画済みの道の帯そのものをマスクにし、破線センターラインを道と同じ長さだけ現す -->
+      <mask id="reveal" maskUnits="userSpaceOnUse" x="0" y="0" width="1000" height="640">
+        <path id="revealPath" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"
+              d="M 120 600 C 120 500 320 500 340 420 C 360 340 540 380 560 300 C 580 220 380 250 440 180 C 500 110 740 170 760 110 C 790 70 840 150 856 190"/>
+      </mask>
+    </defs>
+    <path class="hill" d="M0 640 L0 430 Q250 350 520 420 T1000 380 L1000 640 Z"/>
+    <path class="hill2" d="M0 640 L0 520 Q300 470 600 520 T1000 500 L1000 640 Z"/>
+    <path id="road" class="road-bg" d="M 120 600 C 120 500 320 500 340 420 C 360 340 540 380 560 300 C 580 220 380 250 440 180 C 500 110 740 170 760 110 C 790 70 840 150 856 190"/>
+    <path id="roadTop" class="road" d="M 120 600 C 120 500 320 500 340 420 C 360 340 540 380 560 300 C 580 220 380 250 440 180 C 500 110 740 170 760 110 C 790 70 840 150 856 190"/>
+    <path id="center" class="center" mask="url(#reveal)" d="M 120 600 C 120 500 320 500 340 420 C 360 340 540 380 560 300 C 580 220 380 250 440 180 C 500 110 740 170 760 110 C 790 70 840 150 856 190"/>
+    <g id="markers"></g>
+    <circle id="traveler" class="traveler" r="7" cx="120" cy="600" style="opacity:0"/>
+  </svg>
+</div>
+<div class="head"><h1>描かれる道</h1><p>スクロールで道が伸びていきます</p></div>
+<div class="meter"><i id="meterFill" style="height:0%"></i></div>
+<div class="stop" id="stop"></div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const smooth = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+  const SVGNS = "http://www.w3.org/2000/svg";
+
+  const road = document.getElementById("road");
+  const roadTop = document.getElementById("roadTop");
+  const center = document.getElementById("center");
+  const traveler = document.getElementById("traveler");
+  const markersG = document.getElementById("markers");
+  const meterFill = document.getElementById("meterFill");
+  const stop = document.getElementById("stop");
+
+  const LEN = road.getTotalLength();
+  [road, roadTop].forEach((p) => { p.style.strokeDasharray = LEN; p.style.strokeDashoffset = LEN; });
+  center.style.strokeDasharray = `2 16`;                 // 破線の見た目は維持
+  // センターラインは clip で伸ばす代わりに、mask 用の別パスで隠す
+  // ここでは単純に描画済み長さでダッシュ配列を切り替える
+  const CLEN = center.getTotalLength();
+
+  // ---- 道沿いの要素（順に出現）----
+  const MARKERS = [
+    { frac: 0.10, type: "tree", s: 1.0 },
+    { frac: 0.20, type: "sign", label: "はじまり" },
+    { frac: 0.30, type: "tree", s: 0.8 },
+    { frac: 0.44, type: "tree", s: 1.1 },
+    { frac: 0.58, type: "sign", label: "半ば" },
+    { frac: 0.68, type: "tree", s: 0.9 },
+    { frac: 0.82, type: "tree", s: 1.05 },
+    { frac: 0.93, type: "tree", s: 0.85 },
+    { frac: 1.00, type: "house", label: "とうちゃく" },
+  ];
+
+  function makeTree(x, y, s) {
+    const g = document.createElementNS(SVGNS, "g");
+    g.setAttribute("class", "marker tree");
+    const sc = 1;
+    g.innerHTML =
+      `<rect class="trunk" x="${x - 2}" y="${y - 14}" width="4" height="16" rx="1.5"/>` +
+      `<path d="M ${x} ${y - 46} L ${x - 15} ${y - 14} L ${x + 15} ${y - 14} Z" fill="#a9dcc0"/>` +
+      `<path d="M ${x} ${y - 58} L ${x - 12} ${y - 26} L ${x + 12} ${y - 26} Z" fill="#5bbcb1" opacity=".9"/>`;
+    g.style.transform = `scale(${s})`; g.style.transformOrigin = `${x}px ${y}px`;
+    return g;
+  }
+  function makeSign(x, y, label) {
+    const g = document.createElementNS(SVGNS, "g");
+    g.setAttribute("class", "marker");
+    g.innerHTML =
+      `<line class="post" x1="${x}" y1="${y}" x2="${x}" y2="${y - 34}"/>` +
+      `<rect class="sign" x="${x}" y="${y - 40}" width="58" height="18" rx="4"/>` +
+      `<text class="sign-t" x="${x + 8}" y="${y - 27}">${label}</text>`;
+    return g;
+  }
+  function makeHouse(x, y) {
+    const g = document.createElementNS(SVGNS, "g");
+    g.setAttribute("class", "marker");
+    const w = 62, h = 46;
+    g.innerHTML =
+      `<rect class="house-wall" x="${x - w / 2}" y="${y - h}" width="${w}" height="${h}" rx="3"/>` +
+      `<path class="house-roof" d="M ${x - w / 2 - 6} ${y - h} L ${x} ${y - h - 30} L ${x + w / 2 + 6} ${y - h} Z"/>` +
+      `<rect class="house-door" x="${x - 9}" y="${y - 24}" width="18" height="24" rx="2"/>` +
+      `<rect class="win" x="${x + 12}" y="${y - 36}" width="14" height="14" rx="2"/>` +
+      `<rect class="win" x="${x - 26}" y="${y - 36}" width="14" height="14" rx="2"/>`;
+    return g;
+  }
+
+  const markerEls = MARKERS.map((m) => {
+    const pt = road.getPointAtLength(m.frac * LEN);
+    let el;
+    if (m.type === "tree") el = makeTree(pt.x, pt.y + 6, m.s);
+    else if (m.type === "sign") el = makeSign(pt.x + 10, pt.y, m.label);
+    else el = makeHouse(pt.x, pt.y + 6);
+    markersG.appendChild(el);
+    return { ...m, el, pt };
+  });
+
+  // ---- スクロール ----
+  let progress = 0, shown = 0;
+  const readScroll = () => {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    progress = max > 0 ? clamp(scrollY / max, 0, 1) : 0;
+  };
+  addEventListener("scroll", readScroll, { passive: true });
+  addEventListener("resize", readScroll);
+  readScroll();
+
+  let last = performance.now(), time = 0;
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    shown += (progress - shown) * (1 - Math.exp(-dt * 6));
+    if (!rm.matches) time += dt;
+    const drawn = smooth(shown);                          // 描画済み割合 0..1
+
+    // 道を dasharray で描き出す
+    const off = LEN * (1 - drawn);
+    road.style.strokeDashoffset = off;
+    roadTop.style.strokeDashoffset = off;
+    // センターラインは描画済み部分のみ破線を出す（先を隠す）
+    center.style.strokeDasharray = `2 16 0 ${Math.max(0, (CLEN - CLEN * drawn))}`;
+    center.style.strokeDashoffset = 0;
+
+    // 先端の旅人
+    if (drawn > 0.001 && drawn < 0.999) {
+      const p = road.getPointAtLength(drawn * LEN);
+      traveler.setAttribute("cx", p.x); traveler.setAttribute("cy", p.y);
+      const pulse = rm.matches ? 1 : 1 + Math.sin(time * 4) * 0.12;
+      traveler.setAttribute("r", (6 * pulse).toFixed(2));
+      traveler.style.opacity = "1";
+    } else traveler.style.opacity = "0";
+
+    // マーカーの出現（道が到達したら pop）
+    let current = "";
+    for (const m of markerEls) {
+      const rev = clamp((drawn - m.frac + 0.05) / 0.05, 0, 1);
+      const s = smooth(rev);
+      m.el.style.opacity = s.toFixed(3);
+      const baseScale = m.type === "tree" ? m.s : 1;
+      m.el.style.transform = `translateY(${((1 - s) * 14).toFixed(1)}px) scale(${(baseScale * (0.6 + s * 0.4)).toFixed(3)})`;
+      m.el.style.transformOrigin = `${m.pt.x}px ${m.pt.y + 6}px`;
+      if (drawn >= m.frac - 0.02 && m.label) current = m.label;
+    }
+    stop.textContent = current;
+    stop.style.opacity = current ? "1" : "0";
+
+    meterFill.style.height = (shown * 100).toFixed(1) + "%";
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

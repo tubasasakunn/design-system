@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ゴムひも</title>
+<meta name="pattern-title" content="ゴムひも">
+<meta name="pattern-desc" content="つまんで引くと距離に応じ抵抗が増すゴム。離すと減衰振動で戻り、引きすぎると千切れて再生する。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100dvh; }
+  .hud {
+    position: fixed; left: 0; right: 0; bottom: 26px;
+    text-align: center; pointer-events: none;
+  }
+  .hud h1 { font-size: clamp(18px,3.6vw,26px); font-weight:600; letter-spacing:.04em; margin:0 0 6px; }
+  .hud p { margin:0; font-size:13px; line-height:1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div class="hud">
+    <h1>ゴムひも</h1>
+    <p>中央のつまみをドラッグ。引くほど抵抗が増します。<br>離すとぷるぷる戻り、引きすぎると千切れて再生します。</p>
+  </div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+
+  let C = {};
+  function readColors() {
+    C = {
+      accent: token("--color-accent-default", "#5bbcb1"),
+      accentH: token("--color-accent-hover", "#46a89d"),
+      ink: token("--color-accent-fg", "#07312d"),
+      peg: token("--color-border-strong", "#ddd5c6"),
+      fg: token("--color-fg-secondary", "#6c655b"),
+      muted: token("--color-fg-muted", "#a79f91"),
+      elev: token("--color-bg-elevated", "#fffdf9"),
+    };
+  }
+  readColors();
+
+  let W=0, H=0, dpr=1;
+  function resize() {
+    dpr = Math.min(2, devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight;
+    cv.width = W*dpr; cv.height = H*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    layout();
+  }
+  // 2つのアンカー（左右のペグ）。ゴムはこの間に張られ、つまみは中点。
+  let ax1, ay, ax2, restX, restY;
+  function layout() {
+    ay = H*0.44;
+    ax1 = W*0.5 - Math.min(W*0.28, 230);
+    ax2 = W*0.5 + Math.min(W*0.28, 230);
+    restX = (ax1+ax2)/2; restY = ay;
+    if (state==="idle") { hx=restX; hy=restY; vx=vy=0; }
+  }
+
+  // つまみの状態
+  let hx, hy, vx=0, vy=0;
+  let state = "idle";     // idle | drag | release | broken
+  const MAXPULL = 260;    // 抵抗の飽和スケール
+  const BREAK = 250;      // これを超える「生の」引きで千切れる
+  let breakT = 0;         // 破断アニメの時間
+  let pointerId = null;
+
+  cv.addEventListener("pointerdown", (e) => {
+    if (state === "broken") return;
+    const x = e.clientX, y = e.clientY;
+    if (Math.hypot(x-hx, y-hy) < 46) {
+      state = "drag"; pointerId = e.pointerId;
+      cv.setPointerCapture(pointerId);
+      rawx = x; rawy = y;
+    }
+  });
+  let rawx=0, rawy=0;
+  cv.addEventListener("pointermove", (e) => {
+    if (state !== "drag" || e.pointerId !== pointerId) return;
+    rawx = e.clientX; rawy = e.clientY;
+  });
+  function endDrag() {
+    if (state !== "drag") return;
+    state = "release";
+  }
+  cv.addEventListener("pointerup", endDrag);
+  cv.addEventListener("pointercancel", endDrag);
+
+  // 抵抗マッピング: 生の引き距離 d → 実際の伸び。tanh で飽和させ「引くほど重い」感触。
+  function resist(d) { return MAXPULL * Math.tanh(d / MAXPULL); }
+
+  function breakBand() {
+    state = "broken"; breakT = 0;
+    // 破断の破片（左右）が縮む勢い
+    snapPhase = 0;
+  }
+  let snapPhase = 0;
+
+  const K = 260, DAMP = 12;   // 戻りばね（減衰振動）
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now-last)/1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    if (state === "drag") {
+      const dx = rawx - restX, dy = rawy - restY;
+      const d = Math.hypot(dx, dy) || 1;
+      if (d > BREAK && !reduce) { breakBand(); }
+      else {
+        const rr = resist(d);
+        const tx = restX + dx/d*rr, ty = restY + dy/d*rr;
+        // つまみは抵抗位置へ素早く（でも少し遅れて）追従
+        const k = reduce ? 1 : 1 - Math.pow(0.0006, dt);
+        hx += (tx-hx)*k; hy += (ty-hy)*k;
+        vx = vy = 0;
+      }
+    } else if (state === "release") {
+      // 減衰調和振動でアンカー中点へ
+      const ax = -K*(hx-restX) - DAMP*vx;
+      const ay2 = -K*(hy-restY) - DAMP*vy;
+      vx += ax*dt; vy += ay2*dt;
+      hx += vx*dt; hy += vy*dt;
+      if (Math.hypot(hx-restX, hy-restY) < 0.4 && Math.hypot(vx,vy) < 3) {
+        hx=restX; hy=restY; vx=vy=0; state="idle";
+      }
+    } else if (state === "broken") {
+      breakT += dt; snapPhase += dt;
+      if (breakT > 0.9) {
+        // 再生: ゴムが戻ってくる
+        state = "release"; hx = restX; hy = restY; vx = vy = 0;
+      }
+    }
+    draw(now/1000);
+    requestAnimationFrame(frame);
+  }
+
+  // 2点間をつまみ経由で結ぶ、太さが伸びで細る帯。少し「ぷるぷる」揺れる。
+  function bandPath(x1,y1, mx,my, x2,y2, wob) {
+    const seg = 26, pts = [];
+    for (let i=0;i<=seg;i++){
+      const t = i/seg;
+      // つまみを通る二次ベジェ的な折れ（左右2本を分けて描く）
+      let x,y;
+      if (t <= 0.5) { const u=t/0.5; x=x1+(mx-x1)*u; y=y1+(my-y1)*u; }
+      else { const u=(t-0.5)/0.5; x=mx+(x2-mx)*u; y=my+(y2-my)*u; }
+      pts.push([x, y + wob*Math.sin(t*Math.PI*3 + wobPhase)* (1-Math.abs(t-0.5)*2)*0.6]);
+    }
+    return pts;
+  }
+  let wobPhase = 0;
+
+  function stretchAmt() { return Math.hypot(hx-restX, hy-restY); }
+
+  function draw(t) {
+    ctx.clearRect(0,0,W,H);
+    const st = stretchAmt();
+    if (!reduce) wobPhase = (state==="release") ? t*22 : t*4;
+
+    // ペグ（固定点）
+    for (const [px,py] of [[ax1,ay],[ax2,ay]]) {
+      ctx.beginPath(); ctx.arc(px,py,9,0,Math.PI*2);
+      ctx.fillStyle = C.peg; ctx.fill();
+      ctx.beginPath(); ctx.arc(px,py,4,0,Math.PI*2);
+      ctx.fillStyle = C.elev; ctx.fill();
+    }
+
+    if (state === "broken") {
+      // 千切れた2本が両端へ跳ね戻る
+      const k = Math.min(1, breakT/0.5);
+      const ease = 1 - Math.pow(1-k, 3);
+      const midx = restX, midy = restY;
+      const recoil = 46*Math.sin(breakT*26)*Math.exp(-breakT*5);
+      drawStrand(ax1, ay, midx + (ax1-midx)*ease*0.9, midy + recoil*0.4, 6.5*(1-k*0.6));
+      drawStrand(ax2, ay, midx + (ax2-midx)*ease*0.9, midy - recoil*0.4, 6.5*(1-k*0.6));
+      // ぱちんの光
+      ctx.beginPath(); ctx.arc(midx, midy, 26*(1-k), 0, Math.PI*2);
+      ctx.strokeStyle = "rgba(240,168,189,"+(0.6*(1-k))+")"; ctx.lineWidth = 3; ctx.stroke();
+      return;
+    }
+
+    // 伸びに応じて細く、色を濃く
+    const stretchN = Math.min(1, st/MAXPULL);
+    const width = 8 - 3.4*stretchN;
+    const wob = reduce ? 0 : (state==="release" ? 10*Math.exp(-((t*0)+0)) : 6) * (0.4+0.6*Math.min(1,st/60));
+
+    const pts = bandPath(ax1,ay, hx,hy, ax2,ay, reduce?0:wob);
+    // グロー
+    ctx.beginPath();
+    for (let i=0;i<pts.length;i++){ const [x,y]=pts[i]; i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.strokeStyle = C.accent; ctx.globalAlpha = 0.22;
+    ctx.lineWidth = width + 10; ctx.stroke();
+    ctx.globalAlpha = 1;
+    // 本体
+    ctx.beginPath();
+    for (let i=0;i<pts.length;i++){ const [x,y]=pts[i]; i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+    const grad = ctx.createLinearGradient(ax1,ay,ax2,ay);
+    grad.addColorStop(0, C.accentH); grad.addColorStop(0.5, C.accent); grad.addColorStop(1, C.accentH);
+    ctx.strokeStyle = grad; ctx.lineWidth = width; ctx.stroke();
+    // ハイライト筋
+    ctx.beginPath();
+    for (let i=0;i<pts.length;i++){ const [x,y]=pts[i]; i?ctx.lineTo(x,y-width*0.22):ctx.moveTo(x,y-width*0.22); }
+    ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = width*0.28; ctx.stroke();
+
+    // つまみ
+    const knobR = 20 - 4*stretchN;
+    const g = ctx.createRadialGradient(hx-6,hy-7,2, hx,hy,knobR+3);
+    g.addColorStop(0, "rgba(255,255,255,.9)"); g.addColorStop(0.5, C.accent); g.addColorStop(1, C.accentH);
+    ctx.beginPath(); ctx.arc(hx,hy,knobR,0,Math.PI*2);
+    ctx.fillStyle = g; ctx.shadowColor="rgba(40,35,25,.3)"; ctx.shadowBlur=14; ctx.shadowOffsetY=6;
+    ctx.fill(); ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+
+    // 破断警告リング（引きすぎ間近）
+    const raw = state==="drag" ? Math.hypot(rawx-restX, rawy-restY) : 0;
+    if (raw > BREAK*0.7) {
+      const warn = Math.min(1,(raw-BREAK*0.7)/(BREAK*0.3));
+      ctx.beginPath(); ctx.arc(hx,hy,knobR+6+warn*3,0,Math.PI*2);
+      ctx.strokeStyle = "rgba(239,91,91,"+(0.3+0.5*warn)+")"; ctx.lineWidth=2; ctx.setLineDash([4,5]); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+  function drawStrand(x1,y1,x2,y2,w){
+    ctx.beginPath(); ctx.moveTo(x1,y1);
+    const mx=(x1+x2)/2, my=(y1+y2)/2 + (x2>x1? -18:18);
+    ctx.quadraticCurveTo(mx,my,x2,y2);
+    ctx.lineCap="round"; ctx.strokeStyle=C.accent; ctx.lineWidth=Math.max(1,w); ctx.stroke();
+  }
+
+  resize();
+  addEventListener("resize", resize);
+  requestAnimationFrame(frame);
+  new MutationObserver(readColors).observe(root, { attributes:true, attributeFilter:["data-theme","data-appearance"] });
+})();
+</script>
+</body>
+</html>

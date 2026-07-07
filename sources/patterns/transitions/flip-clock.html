@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="パタパタ時計">
+<meta name="pattern-desc" content="3D 折返しのフリップクロック。分秒が変わるたび上下半分がパタッとめくれる。桁ごとに状態を管理する。">
+<title>パタパタ時計</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  .clock-wrap { text-align: center; }
+  .eyebrow {
+    font-size: .72rem; letter-spacing: .3em; text-transform: uppercase;
+    color: var(--color-fg-muted); margin-bottom: 22px;
+  }
+  .clock {
+    display: flex; align-items: center; justify-content: center;
+    gap: clamp(6px, 2.2vw, 14px);
+  }
+  .group { display: flex; gap: clamp(4px, 1.4vw, 8px); }
+  .colon {
+    display: flex; flex-direction: column; justify-content: center; gap: 14px;
+    align-self: center; padding: 0 2px;
+  }
+  .colon i {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--color-accent-default);
+    display: block;
+    animation: blink 2s steps(1) infinite;
+  }
+  @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: .28; } }
+  @media (prefers-reduced-motion: reduce) { .colon i { animation: none; } }
+
+  .digit {
+    position: relative;
+    width: clamp(46px, 12vw, 76px);
+    height: clamp(70px, 18vw, 112px);
+    perspective: 340px;
+  }
+  .face {
+    position: absolute; left: 0; width: 100%; height: 50%;
+    overflow: hidden;
+    display: flex; justify-content: center;
+    background: var(--color-bg-elevated);
+    box-shadow: inset 0 0 0 1px var(--color-border-default);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+  }
+  .face span {
+    font-size: clamp(3rem, 13vw, 5rem);
+    line-height: clamp(70px, 18vw, 112px);
+    height: clamp(70px, 18vw, 112px);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-fg-primary);
+    letter-spacing: 0;
+  }
+  .face.upper { top: 0; align-items: flex-start; border-radius: 14px 14px 0 0; }
+  .face.lower { bottom: 0; align-items: flex-end; border-radius: 0 0 14px 14px; }
+  /* 中央の分割線 */
+  .digit::after {
+    content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    height: 1px; transform: translateY(-.5px);
+    background: color-mix(in srgb, var(--color-border-strong) 90%, transparent);
+    z-index: 6; pointer-events: none;
+  }
+  .flip {
+    z-index: 5;
+    will-change: transform;
+  }
+  .flip.upper { transform-origin: 50% 100%; }
+  .flip.lower { transform-origin: 50% 0%; }
+  /* めくれ中の陰影 */
+  .flip .shade {
+    position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    background: linear-gradient(180deg, rgba(20,16,10,0) 0%, rgba(20,16,10,.22) 100%);
+  }
+  .flip.lower .shade { background: linear-gradient(0deg, rgba(20,16,10,0) 0%, rgba(20,16,10,.18) 100%); }
+
+  .caption { margin-top: 24px; font-size: .78rem; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<div class="clock-wrap">
+  <div class="eyebrow">design system</div>
+  <div class="clock" id="clock" aria-label="時計"></div>
+  <div class="caption">分・秒が変わるたび、上下がパタッとめくれます</div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const clock = document.getElementById("clock");
+
+  // 桁の生成。upper/lower の静的面と、めくれる flip 面を持つ。
+  function makeDigit() {
+    const d = document.createElement("div");
+    d.className = "digit";
+    d.innerHTML = `
+      <div class="face upper static-top"><span>0</span></div>
+      <div class="face lower static-bottom"><span>0</span></div>
+      <div class="face upper flip flip-top"><span>0</span></div>
+      <div class="face lower flip flip-bottom"><span>0</span></div>`;
+    const parts = {
+      el: d,
+      statTop: d.querySelector(".static-top span"),
+      statBottom: d.querySelector(".static-bottom span"),
+      flipTop: d.querySelector(".flip-top"),
+      flipTopSpan: d.querySelector(".flip-top span"),
+      flipBottom: d.querySelector(".flip-bottom"),
+      flipBottomSpan: d.querySelector(".flip-bottom span"),
+      value: null,
+      running: false,
+    };
+    // 初期はめくれ面を隠す（-90/90）
+    parts.flipTop.style.transform = "rotateX(-90deg)";
+    parts.flipBottom.style.transform = "rotateX(90deg)";
+    return parts;
+  }
+
+  function setInstant(dg, v) {
+    dg.value = v;
+    dg.statTop.textContent = v;
+    dg.statBottom.textContent = v;
+    dg.flipTopSpan.textContent = v;
+    dg.flipBottomSpan.textContent = v;
+    dg.flipTop.style.transform = "rotateX(-90deg)";
+    dg.flipBottom.style.transform = "rotateX(90deg)";
+  }
+
+  const EASE_IN = "cubic-bezier(.45,.05,.75,.35)";
+  const EASE_OUT = "cubic-bezier(.2,.7,.4,1.02)";
+  const T = 300;   // 半分あたりの時間
+
+  function flipTo(dg, next) {
+    const prev = dg.value;
+    if (prev === next) return;
+    if (rm.matches) { setInstant(dg, next); return; }
+    dg.value = next;
+    dg.running = true;
+
+    // 上半分: 現在値を見せたまま折り畳む。折り畳んだ先に見える静的上面を先に新値へ。
+    dg.statTop.textContent = next;         // めくれた奥に新しい上半分
+    dg.statBottom.textContent = prev;      // 下半分はまだ旧値
+    dg.flipTopSpan.textContent = prev;     // めくれる葉の表は旧値の上半分
+    dg.flipBottomSpan.textContent = next;  // 続いて降りてくる葉は新値の下半分
+
+    const shTop = ensureShade(dg.flipTop);
+    const shBottom = ensureShade(dg.flipBottom);
+
+    // フェーズ1: 上の葉が 0 → -90 で下に折れる
+    dg.flipTop.style.transform = "rotateX(0deg)";
+    const a1 = dg.flipTop.animate(
+      [{ transform: "rotateX(0deg)" }, { transform: "rotateX(-90deg)" }],
+      { duration: T, easing: EASE_IN, fill: "forwards" }
+    );
+    shTop.animate([{ opacity: 0 }, { opacity: 1 }], { duration: T, easing: EASE_IN, fill: "forwards" });
+
+    a1.onfinish = () => {
+      // フェーズ2: 下の葉が 90 → 0 で降りて着地
+      dg.statBottom.textContent = next;    // 着地後に下半分を新値へ
+      const a2 = dg.flipBottom.animate(
+        [{ transform: "rotateX(90deg)" }, { transform: "rotateX(0deg)" }],
+        { duration: T, easing: EASE_OUT, fill: "forwards" }
+      );
+      shBottom.animate([{ opacity: 1 }, { opacity: 0 }], { duration: T, easing: EASE_OUT, fill: "forwards" });
+      a2.onfinish = () => {
+        // 後始末: めくれ面を隠し、静的面に確定させる
+        dg.flipTop.style.transform = "rotateX(-90deg)";
+        dg.flipBottom.style.transform = "rotateX(90deg)";
+        shTop.style.opacity = "0"; shBottom.style.opacity = "0";
+        dg.running = false;
+      };
+    };
+  }
+
+  function ensureShade(faceEl) {
+    let s = faceEl.querySelector(".shade");
+    if (!s) { s = document.createElement("div"); s.className = "shade"; faceEl.appendChild(s); }
+    return s;
+  }
+
+  // 時計の組み立て: HH : MM : SS
+  const digits = [];
+  function addGroup(n) {
+    const g = document.createElement("div");
+    g.className = "group";
+    for (let i = 0; i < n; i++) { const dg = makeDigit(); digits.push(dg); g.appendChild(dg.el); }
+    clock.appendChild(g);
+  }
+  function addColon() {
+    const c = document.createElement("div");
+    c.className = "colon";
+    c.innerHTML = "<i></i><i></i>";
+    clock.appendChild(c);
+  }
+  addGroup(2); addColon(); addGroup(2); addColon(); addGroup(2);
+
+  function timeDigits(date) {
+    const p = (x) => String(x).padStart(2, "0");
+    return (p(date.getHours()) + p(date.getMinutes()) + p(date.getSeconds())).split("");
+  }
+
+  // 初期表示（即時）
+  timeDigits(new Date()).forEach((ch, i) => setInstant(digits[i], ch));
+
+  let lastStr = "";
+  function tick() {
+    const now = new Date();
+    const arr = timeDigits(now);
+    arr.forEach((ch, i) => { if (digits[i].value !== ch) flipTo(digits[i], ch); });
+    lastStr = arr.join("");
+  }
+  lastStr = timeDigits(new Date()).join("");
+
+  // 秒境界に合わせて更新
+  let timer = 0;
+  function schedule() {
+    const now = new Date();
+    const ms = 1000 - now.getMilliseconds();
+    timer = setTimeout(() => { tick(); schedule(); }, ms);
+  }
+  schedule();
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      // 復帰時はズレを即時補正
+      timeDigits(new Date()).forEach((ch, i) => { if (digits[i].value !== ch) setInstant(digits[i], ch); });
+    }
+  });
+})();
+</script>
+</body>
+</html>

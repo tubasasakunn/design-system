@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="組子格子">
+<meta name="pattern-desc" content="組子細工風の幾何格子をセルごとに生成する。共有する辺のソケットを走査順に整合させる簡易WFCで隣接する文様を連結させ、生成し直すたび異なる繊細な文様を編む。">
+<title>組子格子</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .panel {
+    position: fixed; left: 24px; bottom: 24px; max-width: 340px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+  }
+  .panel h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .panel p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  .row { margin-top: 12px; display: flex; gap: 8px; }
+  button {
+    font: inherit; font-size: .78rem; cursor: pointer; padding: .4rem .8rem;
+    border-radius: 999px; color: var(--color-accent-fg); background: var(--color-accent-default);
+    border: 1px solid transparent; transition: background .2s;
+  }
+  button:hover { background: var(--color-accent-hover); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+  <h1>組子格子</h1>
+  <p>セルごとに文様が生成され、共有辺のソケットを整合させる簡易WFCで連結します。生成し直すたび違う文様になります。</p>
+  <div class="row">
+    <button id="regen">編み直す</button>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let bg, ink, accent, edge, muted, elev;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    ink = hex(token("--color-fg-primary", "#2c2a26"));
+    muted = hex(token("--color-fg-muted", "#a79f91"));
+    edge = hex(token("--color-border-strong", "#ddd5c6"));
+    accent = hex(token("--color-accent-default", "#5bbcb1"));
+  }
+
+  let W = 0, H = 0, size = 88, cols = 0, rows = 0, ox = 0, oy = 0;
+  let cells = [];       // {N,E,S,W (socket bool), motif (0..2)}
+  let order = [];       // 対角走査での表示順
+  let revealed = 0;
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    size = Math.max(64, Math.min(120, Math.min(W, H) / 7));
+    cols = Math.max(3, Math.round(W / size));
+    rows = Math.max(3, Math.round(H / size));
+    size = Math.min(W / cols, H / rows);
+    ox = (W - cols * size) / 2;
+    oy = (H - rows * size) / 2;
+    generate();
+  }
+
+  const at = (x, y) => cells[y * cols + x];
+
+  // ---- 簡易 WFC: 走査順にソケットを整合させて生成 ----
+  // 各セルの N/W ソケットは上・左の隣接セルの S/E に一致させ、E/S は自由に選ぶ。
+  // これにより共有辺のソケットが必ず一致し、線が連結する。
+  function generate() {
+    cells = new Array(cols * rows);
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const up = y > 0 ? cells[(y - 1) * cols + x] : null;
+        const left = x > 0 ? cells[y * cols + (x - 1)] : null;
+        // 制約: 上下・左右で共有辺を一致
+        const N = up ? up.S : (Math.random() < 0.7);
+        const Wd = left ? left.E : (Math.random() < 0.7);
+        // 自由な辺（次のセルの制約になる）。外周は連結させて枠を作る。
+        const E = (x === cols - 1) ? true : (Math.random() < 0.72);
+        const S = (y === rows - 1) ? true : (Math.random() < 0.72);
+        cells[y * cols + x] = { N, E, S, W: Wd, motif: (Math.random() * 3) | 0 };
+      }
+    }
+    // 対角走査の表示順
+    order = [];
+    for (let s = 0; s <= cols + rows; s++)
+      for (let x = 0; x <= s; x++) {
+        const y = s - x;
+        if (x < cols && y < rows) order.push(y * cols + x);
+      }
+    const orderPos = new Int32Array(cols * rows);
+    order.forEach((idx, i) => { orderPos[idx] = i; });
+    for (let i = 0; i < cells.length; i++) cells[i].pos = orderPos[i];
+    revealed = rm.matches ? cells.length + 2 : 0;
+  }
+
+  // 2 本の平行細線（組子の木片風）
+  function strip(x1, y1, x2, y2, gap, col, alpha, lw) {
+    let nx = -(y2 - y1), ny = x2 - x1;
+    const l = Math.hypot(nx, ny) || 1;
+    nx = nx / l * gap * 0.5; ny = ny / l * gap * 0.5;
+    ctx.strokeStyle = rgba(col, alpha);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(x1 + nx, y1 + ny); ctx.lineTo(x2 + nx, y2 + ny);
+    ctx.moveTo(x1 - nx, y1 - ny); ctx.lineTo(x2 - nx, y2 - ny);
+    ctx.stroke();
+  }
+  function line(x1, y1, x2, y2, col, alpha, lw) {
+    ctx.strokeStyle = rgba(col, alpha);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+
+  function drawCell(x, y, c, alpha) {
+    const cx = ox + x * size + size / 2;
+    const cy = oy + y * size + size / 2;
+    const h = size / 2;
+    const rd = h * 0.5;                    // 中央菱形の半径
+    const lw = Math.max(1, size * 0.014);
+    const barCol = mix(edge, ink, 0.45);
+    const diaCol = mix(accent, ink, 0.15);
+    const gap = size * 0.05;
+
+    // 辺の中点
+    const mid = {
+      N: [cx, cy - h], E: [cx + h, cy], S: [cx, cy + h], W: [cx - h, cy],
+    };
+    const dvert = {
+      N: [cx, cy - rd], E: [cx + rd, cy], S: [cx, cy + rd], W: [cx - rd, cy],
+    };
+    // 有効ソケットの木片（辺中点 → 菱形頂点）。隣と共有され連結する。
+    for (const k of ["N", "E", "S", "W"]) {
+      if (c[k]) strip(mid[k][0], mid[k][1], dvert[k][0], dvert[k][1], gap, barCol, alpha, lw);
+    }
+    // 中央の菱形（回転した正方形）
+    ctx.strokeStyle = rgba(diaCol, alpha);
+    ctx.lineWidth = lw * 1.1;
+    ctx.beginPath();
+    ctx.moveTo(dvert.N[0], dvert.N[1]);
+    ctx.lineTo(dvert.E[0], dvert.E[1]);
+    ctx.lineTo(dvert.S[0], dvert.S[1]);
+    ctx.lineTo(dvert.W[0], dvert.W[1]);
+    ctx.closePath();
+    ctx.stroke();
+
+    // セルごとの文様（隣接に無関係な内側装飾で変化を出す）
+    if (c.motif === 1) {
+      // 内側に十字（麻の葉のヒント）
+      line(dvert.N[0], dvert.N[1], dvert.S[0], dvert.S[1], muted, alpha * 0.7, lw * 0.8);
+      line(dvert.W[0], dvert.W[1], dvert.E[0], dvert.E[1], muted, alpha * 0.7, lw * 0.8);
+    } else if (c.motif === 2) {
+      // 一回り小さい菱形を入れ子に
+      const ri = rd * 0.5;
+      ctx.strokeStyle = rgba(muted, alpha * 0.7);
+      ctx.lineWidth = lw * 0.8;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - ri); ctx.lineTo(cx + ri, cy);
+      ctx.lineTo(cx, cy + ri); ctx.lineTo(cx - ri, cy);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    // 菱形頂点をつなぐ面取り（斜め）で八角の連なりに
+    ctx.strokeStyle = rgba(mix(edge, ink, 0.3), alpha * 0.85);
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(dvert.N[0], dvert.N[1]); ctx.lineTo(dvert.E[0], dvert.E[1]);
+    ctx.moveTo(dvert.E[0], dvert.E[1]); ctx.lineTo(dvert.S[0], dvert.S[1]);
+    ctx.moveTo(dvert.S[0], dvert.S[1]); ctx.lineTo(dvert.W[0], dvert.W[1]);
+    ctx.moveTo(dvert.W[0], dvert.W[1]); ctx.lineTo(dvert.N[0], dvert.N[1]);
+    ctx.stroke();
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = rgba(bg, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    // 外枠
+    ctx.strokeStyle = rgba(mix(edge, ink, 0.35), 0.8);
+    ctx.lineWidth = Math.max(1.5, size * 0.02);
+    ctx.strokeRect(ox, oy, cols * size, rows * size);
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const c = at(x, y);
+        const a = Math.max(0, Math.min(1, revealed - c.pos));
+        if (a <= 0.001) continue;
+        drawCell(x, y, c, a);
+      }
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    if (!rm.matches && revealed < cells.length + 2) revealed += dt * (cols + rows) * 1.1;
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  document.getElementById("regen").addEventListener("click", generate);
+  canvas.addEventListener("pointerdown", generate);
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+
+  resize(); readColors(); generate();
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

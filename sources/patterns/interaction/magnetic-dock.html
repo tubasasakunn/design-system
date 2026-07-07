@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>磁力ドック</title>
+<meta name="pattern-title" content="磁力ドック">
+<meta name="pattern-desc" content="カーソルに吸い付いて拡大し、隣も釣られて膨らむ、ばね補間の柔らかいドック。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+  .stage {
+    display: grid;
+    place-content: center;
+    text-align: center;
+    padding: 0 24px;
+  }
+  .stage h1 {
+    font-size: clamp(20px, 4vw, 34px);
+    font-weight: 600;
+    letter-spacing: .04em;
+    margin: 0 0 10px;
+    color: var(--color-fg-primary);
+  }
+  .stage p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--color-fg-muted);
+  }
+  .dock-wrap {
+    display: flex;
+    justify-content: center;
+    padding: 0 16px 40px;
+  }
+  .dock {
+    display: flex;
+    align-items: flex-end;
+    gap: 0;
+    padding: 12px 18px;
+    border-radius: 26px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 88%, transparent);
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 18px 40px -18px rgba(40, 35, 25, .35), inset 0 1px 0 rgba(255,255,255,.25);
+    backdrop-filter: blur(10px);
+  }
+  .item {
+    position: relative;
+    width: 58px;
+    height: 58px;
+    display: grid;
+    place-items: center;
+    transform-origin: bottom center;
+    will-change: transform;
+    cursor: pointer;
+  }
+  .tile {
+    width: 46px;
+    height: 46px;
+    border-radius: 15px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--color-border-default);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.4), 0 6px 14px -8px rgba(40,35,25,.5);
+  }
+  .tile svg { width: 24px; height: 24px; display: block; }
+  .label {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%) translateY(6px);
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    white-space: nowrap;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 92%, transparent);
+    border: 1px solid var(--color-border-default);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .item.hot .label { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <h1>磁力ドック</h1>
+    <p>下のドックにカーソルを近づけてください。<br>吸い付いて膨らみ、隣も少し釣られます。</p>
+  </div>
+  <div class="dock-wrap">
+    <nav class="dock" id="dock" aria-label="dock"></nav>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const dock = document.getElementById("dock");
+
+  // 淡いパステル多色（差し色）。淡色の上は濃色インク。
+  const PALETTE = [
+    ["#5bbcb1", "#07312d"], ["#f0a8bd", "#5a2436"], ["#f1d189", "#5a4611"],
+    ["#bcb2e8", "#2f2a55"], ["#f3a890", "#5a2b1c"], ["#9fc8ea", "#123049"],
+    ["#a9dcc0", "#134030"],
+  ];
+  // シンプルな stroke アイコン（currentColor）
+  const GLYPHS = {
+    home:   'M3 11l9-7 9 7M6 10v9h12v-9',
+    search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4',
+    heart:  'M12 20s-7-4.6-7-9.4A3.6 3.6 0 0 1 12 8a3.6 3.6 0 0 1 7-2.4c0 4.8-7 9.4-7 9.4z',
+    star:   'M12 4l2.3 4.9 5.2.7-3.8 3.6.9 5.3L12 16.9 7.4 18.4l.9-5.3L4.5 9.5l5.2-.7z',
+    photo:  'M4 6h16v12H4zM8 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM6 18l5-5 3 3 2-2 2 2',
+    music:  'M9 18V6l10-2v12M9 15a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM19 14a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z',
+    mail:   'M4 6h16v12H4zM4 7l8 6 8-6',
+    gear:   'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM12 3v3M12 18v3M4.2 6l2.1 2.1M17.7 15.9l2.1 2.1M3 12h3M18 12h3M4.2 18l2.1-2.1M17.7 8.1l2.1-2.1',
+  };
+  const NAMES = { home:"ホーム", search:"さがす", heart:"お気に入り", star:"スター", photo:"写真", music:"音楽", mail:"メール", gear:"設定" };
+
+  const items = [];
+  Object.keys(GLYPHS).forEach((key, i) => {
+    const [bg, ink] = PALETTE[i % PALETTE.length];
+    const el = document.createElement("div");
+    el.className = "item";
+    el.innerHTML =
+      '<span class="label">' + NAMES[key] + '</span>' +
+      '<span class="tile" style="background:' + bg + ';color:' + ink + '">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="' + GLYPHS[key] + '"/></svg></span>';
+    dock.appendChild(el);
+    // s = 現在スケール, v = 速度, target = 目標スケール
+    items.push({ el, cx: 0, s: 1, v: 1, target: 1, hot: false });
+  });
+
+  const MAX = 1.62;      // 中心の最大拡大率
+  const SPREAD = 108;    // 影響の広がり(px)。大きいほど遠くの隣まで釣られる
+  let pointerX = null;   // ドック座標系でのカーソルx。null=離れている
+
+  function measure() {
+    const dr = dock.getBoundingClientRect();
+    for (const it of items) {
+      const r = it.el.getBoundingClientRect();
+      it.cx = r.left + r.width / 2 - dr.left;   // ドック左端基準
+    }
+    dock._left = dr.left;
+    dock._right = dr.right;
+    dock._top = dr.top;
+  }
+  measure();
+  addEventListener("resize", measure);
+  new ResizeObserver(measure).observe(dock);
+
+  function setPointer(e) {
+    const active = e.clientY > dock._top - 90 &&
+                   e.clientX > dock._left - 60 && e.clientX < dock._right + 60;
+    pointerX = active ? e.clientX - dock._left : null;
+  }
+  addEventListener("pointermove", setPointer, { passive: true });
+  addEventListener("pointerdown", setPointer, { passive: true });
+  addEventListener("pointerleave", () => { pointerX = null; });
+  dock.addEventListener("pointerleave", () => { pointerX = null; });
+
+  // 距離→目標スケールの釣鐘（cos 窓）。近いほど MAX、SPREAD 外は 1。
+  function magnify(dx) {
+    const t = Math.min(1, Math.abs(dx) / SPREAD);
+    const falloff = 0.5 * (1 + Math.cos(t * Math.PI)); // 1→0 の滑らかな窓
+    return 1 + (MAX - 1) * falloff;
+  }
+
+  // ばね定数（柔らかめ）
+  const K = 190, DAMP = 22;
+  let last = performance.now();
+
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    for (const it of items) {
+      it.target = pointerX == null ? 1 : magnify(it.cx - pointerX);
+      it.hot = pointerX != null && Math.abs(it.cx - pointerX) < 34;
+      if (reduce) {
+        it.s = it.target; it.v = 0;
+      } else {
+        // 臨界減衰に近いばね積分
+        const a = K * (it.target - it.s) - DAMP * it.v;
+        it.v += a * dt;
+        it.s += it.v * dt;
+      }
+      // 拡大に応じて少し持ち上げる（下辺基準なので上に伸びる分を補正）
+      const lift = (it.s - 1) * 20;
+      it.el.style.transform = "translateY(" + (-lift) + "px) scale(" + it.s.toFixed(4) + ")";
+      it.el.classList.toggle("hot", it.hot && it.s > 1.15);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // テーマ/外観変化は CSS 変数で追従。tile の差し色は固定パステルなので再取得不要だが、
+  // 属性変化を監視して（将来の拡張・仕様準拠）再測定する。
+  new MutationObserver(measure).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+})();
+</script>
+</body>
+</html>
