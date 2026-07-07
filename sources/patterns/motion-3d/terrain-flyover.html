@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="地形ワイヤーフレーム">
+<meta name="pattern-desc" content="value noise の起伏が刻む谷筋を、ワイヤーフレームのまま静かに前進飛行する。稜線はほのかにティールに灯る。">
+<title>地形ワイヤーフレーム</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 320px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>地形ワイヤーフレーム</h1>
+  <p>蛇行する谷に沿って飛行します。ポインタで視線を傾け、ホイールで速度を調整。ドラッグで手動飛行もできます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // ---- デザイントークン（cream light をフォールバックに）----
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  let cLine, cRidge, cBg;
+  function readColors() {
+    cLine = hex(token("--color-fg-secondary", "#6c655b"));
+    cRidge = hex(token("--color-accent-default", "#5bbcb1"));
+    cBg = hex(token("--color-bg-primary", "#faf7f1"));
+  }
+
+  // ---- value noise（整数ハッシュ + smoothstep 補間、3 オクターブ fbm）----
+  function hash2(ix, iz) {
+    let n = (ix * 374761393 + iz * 668265263) | 0;
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    n ^= n >>> 16;
+    return (n >>> 0) / 4294967295;
+  }
+  function vnoise(x, z) {
+    const ix = Math.floor(x), iz = Math.floor(z);
+    let fx = x - ix, fz = z - iz;
+    fx = fx * fx * (3 - 2 * fx); fz = fz * fz * (3 - 2 * fz);
+    const a = hash2(ix, iz), b = hash2(ix + 1, iz), c = hash2(ix, iz + 1), d = hash2(ix + 1, iz + 1);
+    return a + (b - a) * fx + (c - a) * fz + (a - b - c + d) * fx * fz;
+  }
+  function fbm(x, z) {
+    return vnoise(x, z) * 0.5 + vnoise(x * 2.13, z * 2.13) * 0.28 + vnoise(x * 4.7, z * 4.7) * 0.14;
+  }
+
+  // 谷筋の蛇行（飛行経路）と地形高さ
+  const pathX = (z) => 16 * Math.sin(z * 0.016) + 9 * Math.sin(z * 0.041 + 2.1);
+  function height(x, z) {
+    const d = Math.abs(x - pathX(z));                 // 谷心からの距離
+    const wall = Math.min(1, Math.max(0, (d - 7) / 30)); // 谷底は平坦、外へ行くほど山
+    const m = wall * wall * (3 - 2 * wall);
+    const h = (fbm(x * 0.045, z * 0.045) - 0.32) * 34 * m;
+    return h + (fbm(x * 0.16, z * 0.16) - 0.5) * 2.4;  // 谷底にも細かな起伏
+  }
+
+  // ---- グリッドと投影 ----
+  const COLS = 44, ROWS = 58, XS = 4.2, ZS = 5.0;   // 格子間隔（world 単位）
+  const FAR = ROWS * ZS;
+  let W = 0, H = 0, F = 600;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    F = Math.min(W, H) * 0.95;
+  }
+
+  // カメラ状態
+  let camZ = 0, speed = 34, lookYaw = 0, lookPitch = 0;
+  let tgtYaw = 0, tgtPitch = 0;
+  const CAM_H = 7.5;
+
+  // 1 点をカメラ空間 → 透視投影（yaw → pitch → roll、自前実装）
+  let cy = 1, sy = 0, cp = 1, sp = 0, cr = 1, sr = 0, camX = 0, camY = 0;
+  function project(wx, wy, wz) {
+    let dx = wx - camX, dy = wy - camY, dz = wz - camZ;
+    let x1 = dx * cy - dz * sy, z1 = dx * sy + dz * cy;          // yaw
+    let y2 = dy * cp - z1 * sp, z2 = dy * sp + z1 * cp;          // pitch
+    if (z2 < 1.2) return null;
+    const s = F / z2;
+    let sx = x1 * s, sy2 = -y2 * s;
+    const rx = sx * cr - sy2 * sr, ry = sx * sr + sy2 * cr;      // roll（バンク）
+    return { x: W / 2 + rx, y: H * 0.52 + ry, z: z2 };
+  }
+
+  // ---- 描画 ----
+  const P = [];        // 投影済みグリッド [row][col]
+  for (let r = 0; r <= ROWS; r++) P.push(new Array(COLS + 1));
+
+  function draw() {
+    ctx.fillStyle = `rgb(${cBg[0]},${cBg[1]},${cBg[2]})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // カメラ姿勢を確定
+    const px0 = pathX(camZ), px1 = pathX(camZ + 26);
+    camX = px0;
+    camY = CAM_H;
+    const bank = Math.max(-0.16, Math.min(0.16, (px1 - px0) * -0.012));
+    const yaw = Math.atan2(px1 - px0, 26) * 0.7 + lookYaw;
+    const pitch = -0.10 + lookPitch;
+    cy = Math.cos(yaw); sy = Math.sin(yaw);
+    cp = Math.cos(pitch); sp = Math.sin(pitch);
+    cr = Math.cos(bank); sr = Math.sin(bank);
+
+    // グリッド点を計算（行は camZ に同期してスクロール）
+    const baseRow = Math.floor(camZ / ZS);
+    for (let r = 0; r <= ROWS; r++) {
+      const wz = (baseRow + r) * ZS;
+      const cxr = pathX(wz);                       // 各行を谷心に追従させ、帯が途切れないように
+      for (let c = 0; c <= COLS; c++) {
+        const wx = cxr + (c - COLS / 2) * XS;
+        const h = height(wx, wz);
+        const pr = project(wx, h, wz);
+        P[r][c] = pr ? { x: pr.x, y: pr.y, z: pr.z, h } : null;
+      }
+    }
+
+    // 奥 → 手前の順に、横線（等 z 線）を描く。稜線（高所）はアクセントに寄せて強調
+    ctx.lineCap = "round";
+    for (let r = ROWS; r >= 0; r--) {
+      for (let c = 0; c < COLS; c++) {
+        const a = P[r][c], b = P[r][c + 1];
+        if (!a || !b) continue;
+        const z = (a.z + b.z) / 2;
+        const fog = Math.pow(Math.max(0, 1 - z / FAR), 1.15);
+        if (fog < 0.03) continue;
+        const hh = Math.max(a.h, b.h);
+        const ridge = Math.min(1, Math.max(0, (hh - 5.5) / 11));   // 高い所ほど 1 に
+        const cr3 = [
+          cLine[0] + (cRidge[0] - cLine[0]) * ridge,
+          cLine[1] + (cRidge[1] - cLine[1]) * ridge,
+          cLine[2] + (cRidge[2] - cLine[2]) * ridge,
+        ];
+        ctx.strokeStyle = `rgba(${cr3[0] | 0},${cr3[1] | 0},${cr3[2] | 0},${(0.42 + ridge * 0.5) * fog})`;
+        ctx.lineWidth = (0.9 + ridge * 1.3) * (0.45 + fog * 0.85);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+      // 縦線（3 列ごと）: この行と一つ奥の行を結ぶ
+      if (r < ROWS) {
+        for (let c = 0; c <= COLS; c += 3) {
+          const a = P[r][c], b = P[r + 1][c];
+          if (!a || !b) continue;
+          const fog = Math.pow(Math.max(0, 1 - (a.z + b.z) / 2 / FAR), 1.15);
+          if (fog < 0.03) continue;
+          ctx.strokeStyle = `rgba(${cLine[0]},${cLine[1]},${cLine[2]},${0.26 * fog})`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        }
+      }
+    }
+
+    // 地平のかすみ（fog と同じ空気感を上端に）
+    const g = ctx.createLinearGradient(0, 0, 0, H * 0.42);
+    g.addColorStop(0, `rgba(${cBg[0]},${cBg[1]},${cBg[2]},0.9)`);
+    g.addColorStop(1, `rgba(${cBg[0]},${cBg[1]},${cBg[2]},0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H * 0.42);
+  }
+
+  // ---- 入力: ポインタで視線、ドラッグで手動飛行、ホイールで速度 ----
+  let dragging = false, dpx = 0, dpy = 0;
+  canvas.addEventListener("pointermove", (e) => {
+    if (dragging) {
+      camZ += (dpy - e.clientY) * 0.35;   // 縦ドラッグ = 前後（reduce 時の主操作）
+      tgtYaw += (e.clientX - dpx) * 0.0012;
+      dpx = e.clientX; dpy = e.clientY;
+    } else {
+      const nx = (e.clientX / W) * 2 - 1, ny = (e.clientY / H) * 2 - 1;
+      tgtYaw = nx * 0.22;
+      tgtPitch = -ny * 0.10;
+    }
+  });
+  canvas.addEventListener("pointerdown", (e) => {
+    dragging = true; dpx = e.clientX; dpy = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  const release = () => { dragging = false; };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    speed = Math.min(110, Math.max(8, speed * Math.exp(-e.deltaY * 0.0012)));
+  }, { passive: false });
+
+  // ---- メインループ（デルタ時間でフレームレート非依存）----
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+    if (!rm.matches && !dragging) camZ += speed * dt;   // reduce では自動前進を停止
+    const k = 1 - Math.exp(-dt * 5);
+    lookYaw += (tgtYaw - lookYaw) * k;
+    lookPitch += (tgtPitch - lookPitch) * k;
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

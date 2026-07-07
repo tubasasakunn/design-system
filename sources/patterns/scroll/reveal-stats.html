@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="目覚める数字">
+<meta name="pattern-desc" content="セクション到達で数値がイージング付きにカウントアップし、バーが伸び、円グラフが描かれるダッシュボード。">
+<title>目覚める数字</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 8vh 5vw 12vh; }
+  section { min-height: 62vh; display: flex; flex-direction: column; justify-content: center; padding: 6vh 0; }
+  .eyebrow { font-size: .72rem; letter-spacing: .32em; color: var(--color-accent-fg); margin-bottom: 12px; }
+  h2 { font-size: clamp(1.5rem, 3.6vw, 2.2rem); font-weight: 300; letter-spacing: .01em; margin-bottom: 4px; }
+  .lead { font-size: .86rem; color: var(--color-fg-secondary); margin-bottom: 34px; line-height: 1.7; max-width: 46ch; }
+
+  .reveal { opacity: 0; transform: translateY(26px); transition: opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  /* KPI カード */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+  .kpi {
+    padding: 22px 24px; border-radius: 22px;
+    background: var(--color-bg-elevated); border: 1px solid var(--color-border-default);
+    box-shadow: 0 6px 20px color-mix(in srgb, var(--color-fg-primary) 5%, transparent);
+  }
+  .kpi .num { font-size: clamp(2rem, 5vw, 2.8rem); font-weight: 300; letter-spacing: -.01em; font-variant-numeric: tabular-nums; line-height: 1; }
+  .kpi .num .suf { font-size: .5em; color: var(--color-accent-fg); margin-left: 3px; }
+  .kpi .cap { margin-top: 10px; font-size: .78rem; color: var(--color-fg-secondary); }
+
+  /* バー */
+  .bars { display: flex; flex-direction: column; gap: 20px; }
+  .barrow { display: grid; grid-template-columns: 130px 1fr 56px; align-items: center; gap: 16px; }
+  .barrow .lab { font-size: .82rem; color: var(--color-fg-secondary); }
+  .barrow .track { height: 12px; border-radius: 12px; background: var(--color-bg-secondary); overflow: hidden; }
+  .barrow .track i { display: block; height: 100%; width: 0; border-radius: 12px; }
+  .barrow .val { font-size: .82rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--color-fg-muted); }
+
+  /* ドーナツ */
+  .donutwrap { display: flex; align-items: center; gap: 40px; flex-wrap: wrap; }
+  .donut { position: relative; width: 220px; height: 220px; flex: 0 0 auto; }
+  .donut svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .donut .center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+  .donut .center .big { font-size: 2rem; font-weight: 300; font-variant-numeric: tabular-nums; }
+  .donut .center .sm { font-size: .7rem; letter-spacing: .16em; color: var(--color-fg-muted); }
+  .legend { display: flex; flex-direction: column; gap: 12px; }
+  .legend .li { display: flex; align-items: center; gap: 12px; font-size: .84rem; color: var(--color-fg-secondary); }
+  .legend .dot { width: 12px; height: 12px; border-radius: 4px; flex: 0 0 auto; }
+  .legend .li b { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--color-fg-primary); font-weight: 550; }
+
+  .intro { min-height: 78vh; text-align: center; align-items: center; }
+  .intro h1 { font-size: clamp(1.9rem, 5vw, 3rem); font-weight: 250; letter-spacing: .02em; }
+  .intro p { margin-top: 12px; font-size: .84rem; letter-spacing: .16em; color: var(--color-fg-muted); }
+  .scrolldown { margin-top: 40px; font-size: .74rem; letter-spacing: .2em; color: var(--color-fg-muted); animation: bob 2.4s ease-in-out infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(8px); } }
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { transition: none; opacity: 1; transform: none; }
+    .scrolldown { animation: none; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <section class="intro">
+    <div>
+      <h1 class="reveal">目覚める数字</h1>
+      <p class="reveal">SCROLL TO WAKE THE DASHBOARD</p>
+      <div class="scrolldown reveal">↓</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow reveal">01 · サマリー</div>
+    <h2 class="reveal">この一年のあしあと</h2>
+    <p class="lead reveal">セクションが画面に入ると、数値がやわらかく立ちあがります。</p>
+    <div class="kpis">
+      <div class="kpi reveal"><div class="num" data-to="12480" data-suf="点">0</div><div class="cap">選んだアイコン</div></div>
+      <div class="kpi reveal"><div class="num" data-to="36" data-suf="色">0</div><div class="cap">カラーテーマ</div></div>
+      <div class="kpi reveal"><div class="num" data-to="98.6" data-dec="1" data-suf="%">0</div><div class="cap">整合スコア</div></div>
+      <div class="kpi reveal"><div class="num" data-to="240" data-suf="回">0</div><div class="cap">再ビルド</div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow reveal">02 · 構成比</div>
+    <h2 class="reveal">スタイル別のアイコン</h2>
+    <p class="lead reveal">到達すると各バーが目標値までイージングで伸びます。</p>
+    <div class="bars reveal" id="bars"></div>
+  </section>
+
+  <section>
+    <div class="eyebrow reveal">03 · カテゴリ</div>
+    <h2 class="reveal">表現パターンの内訳</h2>
+    <p class="lead reveal">円グラフは弧が順に描かれ、中央の合計もカウントします。</p>
+    <div class="donutwrap reveal">
+      <div class="donut">
+        <svg viewBox="0 0 100 100" id="donutSvg"></svg>
+        <div class="center"><div><div class="big" id="donutTotal">0</div><div class="sm">合計</div></div></div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+  const PASTEL = { teal: "#5bbcb1", pink: "#f0a8bd", yellow: "#f1d189", lav: "#bcb2e8", coral: "#f3a890", sky: "#9fc8ea", mint: "#a9dcc0" };
+
+  // ---- reveal（フェードイン）----
+  const revealIO = new IntersectionObserver((es) => {
+    for (const e of es) if (e.isIntersecting) { e.target.classList.add("in"); revealIO.unobserve(e.target); }
+  }, { threshold: 0.2 });
+  document.querySelectorAll(".reveal").forEach((el) => revealIO.observe(el));
+
+  // ---- 汎用アニメ：t(0..1) を duration かけて進め fn に渡す（rAF・イージング）----
+  function animate(duration, fn, done) {
+    let start = null;
+    function step(now) {
+      if (start === null) start = now;
+      const t = clamp((now - start) / duration, 0, 1);
+      fn(easeOutCubic(t));
+      if (t < 1) requestAnimationFrame(step); else if (done) done();
+    }
+    requestAnimationFrame(step);
+  }
+
+  // ---- KPI カウントアップ ----
+  const kpiIO = new IntersectionObserver((es) => {
+    for (const e of es) {
+      if (!e.isIntersecting) continue;
+      const el = e.target;
+      const to = parseFloat(el.dataset.to), dec = parseInt(el.dataset.dec || "0", 10), suf = el.dataset.suf || "";
+      kpiIO.unobserve(el);
+      if (rm.matches) { el.innerHTML = to.toFixed(dec) + (suf ? `<span class="suf">${suf}</span>` : ""); continue; }
+      animate(1500, (p) => {
+        const v = (to * p).toFixed(dec);
+        el.innerHTML = Number(v).toLocaleString("ja-JP", { minimumFractionDigits: dec, maximumFractionDigits: dec })
+          + (suf ? `<span class="suf">${suf}</span>` : "");
+      });
+    }
+  }, { threshold: 0.6 });
+  document.querySelectorAll(".kpi .num").forEach((el) => kpiIO.observe(el));
+
+  // ---- バー ----
+  const BARS = [
+    ["rounded", 62, PASTEL.teal],
+    ["sharp", 48, PASTEL.lav],
+    ["soft-fill", 21, PASTEL.pink],
+    ["hand", 9, PASTEL.coral],
+  ];
+  const maxBar = Math.max(...BARS.map((b) => b[1]));
+  const barsWrap = document.getElementById("bars");
+  const barEls = BARS.map(([lab, val, col]) => {
+    const row = document.createElement("div"); row.className = "barrow";
+    row.innerHTML = `<div class="lab">${lab}</div><div class="track"><i></i></div><div class="val">0</div>`;
+    const fill = row.querySelector("i"); fill.style.background = col;
+    barsWrap.appendChild(row);
+    return { fill, val, target: (val / maxBar) * 100, out: row.querySelector(".val") };
+  });
+  const barsIO = new IntersectionObserver((es) => {
+    for (const e of es) {
+      if (!e.isIntersecting) continue;
+      barsIO.unobserve(e.target);
+      barEls.forEach((b, i) => {
+        if (rm.matches) { b.fill.style.width = b.target + "%"; b.out.textContent = b.val; return; }
+        setTimeout(() => animate(1200, (p) => {
+          b.fill.style.width = (b.target * p).toFixed(1) + "%";
+          b.out.textContent = Math.round(b.val * p);
+        }), i * 120); // 順に伸ばす
+      });
+    }
+  }, { threshold: 0.4 });
+  barsIO.observe(barsWrap);
+
+  // ---- ドーナツ（SVG 弧を stroke-dasharray で順に描く）----
+  const SEG = [
+    ["水面", 8, PASTEL.sky],
+    ["3D", 6, PASTEL.lav],
+    ["スクロール", 10, PASTEL.teal],
+    ["ソフト", 5, PASTEL.pink],
+    ["光", 7, PASTEL.yellow],
+    ["粒子", 6, PASTEL.coral],
+  ];
+  const total = SEG.reduce((s, x) => s + x[1], 0);
+  const R = 38, C = 2 * Math.PI * R, cx = 50, cy = 50;
+  const svg = document.getElementById("donutSvg");
+  const NS = "http://www.w3.org/2000/svg";
+  // トラック（下地）
+  const track = document.createElementNS(NS, "circle");
+  track.setAttribute("cx", cx); track.setAttribute("cy", cy); track.setAttribute("r", R);
+  track.setAttribute("fill", "none"); track.setAttribute("stroke", "var(--color-bg-secondary)"); track.setAttribute("stroke-width", "12");
+  svg.appendChild(track);
+
+  let acc = 0;
+  const arcs = SEG.map(([lab, val, col]) => {
+    const frac = val / total;
+    const circle = document.createElementNS(NS, "circle");
+    circle.setAttribute("cx", cx); circle.setAttribute("cy", cy); circle.setAttribute("r", R);
+    circle.setAttribute("fill", "none"); circle.setAttribute("stroke", col);
+    circle.setAttribute("stroke-width", "12"); circle.setAttribute("stroke-linecap", "round");
+    circle.setAttribute("stroke-dasharray", C);
+    circle.setAttribute("stroke-dashoffset", C);
+    circle.style.transform = `rotate(${acc * 360}deg)`;
+    circle.style.transformOrigin = "50% 50%";
+    svg.appendChild(circle);
+    const seg = { circle, frac, len: frac * C, gap: 2 };
+    acc += frac;
+    return seg;
+  });
+  // 凡例
+  const legend = document.getElementById("legend");
+  SEG.forEach(([lab, val, col]) => {
+    const li = document.createElement("div"); li.className = "li";
+    li.innerHTML = `<span class="dot" style="background:${col}"></span>${lab}<b>${val}</b>`;
+    legend.appendChild(li);
+  });
+  const donutTotal = document.getElementById("donutTotal");
+
+  const donutIO = new IntersectionObserver((es) => {
+    for (const e of es) {
+      if (!e.isIntersecting) continue;
+      donutIO.unobserve(e.target);
+      if (rm.matches) {
+        arcs.forEach((a) => a.circle.setAttribute("stroke-dashoffset", C - Math.max(0, a.len - a.gap)));
+        donutTotal.textContent = total; return;
+      }
+      // 各弧を順にドロー（前の弧が描き終わってから次へ）
+      let idx = 0;
+      const drawNext = () => {
+        if (idx >= arcs.length) return;
+        const a = arcs[idx];
+        animate(520, (p) => {
+          const shown = Math.max(0, a.len - a.gap) * p;
+          a.circle.setAttribute("stroke-dashoffset", C - shown);
+        }, () => { idx++; drawNext(); });
+        idx === 0 && animate(arcs.length * 520, (p) => { donutTotal.textContent = Math.round(total * p); });
+      };
+      drawNext();
+    }
+  }, { threshold: 0.5 });
+  donutIO.observe(document.querySelector(".donut"));
+
+  new MutationObserver(() => {}).observe(document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+})();
+</script>
+</body>
+</html>

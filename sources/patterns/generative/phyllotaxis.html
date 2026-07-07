@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ひまわりの螺旋">
+<meta name="pattern-desc" content="黄金角で点を一つずつ配置してフィロタキシス螺旋を立ち上げる。発散角を黄金角からずらすと連続螺旋へと模様が崩れる様子を観察できる。">
+<title>ひまわりの螺旋</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .panel {
+    position: fixed; left: 24px; bottom: 24px; max-width: 380px;
+    padding: 16px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+  }
+  .panel h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .panel p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  .ctl { margin-top: 14px; }
+  .ctl label { display: flex; justify-content: space-between; font-size: .74rem; color: var(--color-fg-secondary); margin-bottom: 8px; }
+  .ctl .val { font-variant-numeric: tabular-nums; color: var(--color-fg-primary); }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    border-radius: 999px; background: var(--color-border-strong); outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 18px; height: 18px;
+    border-radius: 50%; background: var(--color-accent-default);
+    border: 2px solid var(--color-bg-elevated); cursor: pointer;
+    box-shadow: 0 1px 4px rgba(40,35,25,.25);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 18px; height: 18px; border-radius: 50%; background: var(--color-accent-default);
+    border: 2px solid var(--color-bg-elevated); cursor: pointer;
+  }
+  .row { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
+  button {
+    font: inherit; font-size: .74rem; cursor: pointer; padding: .35rem .75rem;
+    border-radius: 999px; color: var(--color-fg-secondary); background: transparent;
+    border: 1px solid var(--color-border-default);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="panel">
+  <h1>ひまわりの螺旋</h1>
+  <p>黄金角(137.5°)で点が一つずつ並び螺旋になります。発散角をずらすと模様が崩れます。</p>
+  <div class="ctl">
+    <label><span>発散角</span><span class="val" id="angleVal">137.508°</span></label>
+    <input type="range" id="angle" min="130" max="145" step="0.01" value="137.508">
+  </div>
+  <div class="row">
+    <button id="golden">黄金角に戻す</button>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const angleInput = document.getElementById("angle");
+  const angleVal = document.getElementById("angleVal");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  // 花芯に振る淡いパステル（虹状の連続）
+  const PALETTE = ["#5bbcb1", "#a9dcc0", "#f1d189", "#f3a890", "#f0a8bd", "#bcb2e8", "#9fc8ea"].map(hex);
+  function paletteAt(t) {
+    const p = t * (PALETTE.length - 1);
+    const i = Math.floor(p), f = p - i;
+    return mix(PALETTE[i], PALETTE[Math.min(i + 1, PALETTE.length - 1)], f);
+  }
+
+  let bg, ink, accent, elev;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    ink = hex(token("--color-fg-primary", "#2c2a26"));
+    accent = hex(token("--color-accent-default", "#5bbcb1"));
+  }
+
+  const GOLDEN = 137.50776405;
+  const MAX_N = 900;
+  let W = 0, H = 0, cx = 0, cy = 0, scale = 1;
+  let angleDeg = GOLDEN;
+  // 各点の現在位置と目標位置（角度変更時になめらかに補間）
+  const pts = [];       // {n, x, y, tx, ty}
+  let count = 0;        // 現在表示している点数（1つずつ増える）
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = W / 2; cy = H / 2;
+    scale = Math.min(W, H) * 0.46 / Math.sqrt(MAX_N);
+    updateTargets();
+  }
+
+  // 発散角に基づいて各点の目標位置を再計算
+  function updateTargets() {
+    const ang = angleDeg * Math.PI / 180;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const r = scale * Math.sqrt(p.n + 0.5);
+      const th = p.n * ang;
+      p.tx = cx + Math.cos(th) * r;
+      p.ty = cy + Math.sin(th) * r;
+    }
+  }
+
+  function addPoint() {
+    const n = pts.length;
+    const ang = angleDeg * Math.PI / 180;
+    const r = scale * Math.sqrt(n + 0.5);
+    const th = n * ang;
+    const tx = cx + Math.cos(th) * r, ty = cy + Math.sin(th) * r;
+    // 中心から立ち上がる（生えてくる）演出
+    pts.push({ n, x: cx, y: cy, tx, ty });
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = rgba(bg, 1);
+    ctx.fillRect(0, 0, W, H);
+
+    const shown = Math.min(count, pts.length);
+    for (let i = 0; i < shown; i++) {
+      const p = pts[i];
+      const t = i / MAX_N;
+      const rad = 1.6 + Math.sqrt(i) * 0.11;   // 外周ほど大きく
+      const col = mix(paletteAt(t), i % 2 ? elev : accent, 0.12);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, rad, 0, Math.PI * 2);
+      ctx.fillStyle = rgba(mix(col, ink, 0.05), 0.92);
+      ctx.fill();
+    }
+    // 芯のほのかな明かり
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, scale * 6);
+    g.addColorStop(0, rgba(mix(bg, accent, 0.18), 0.5));
+    g.addColorStop(1, rgba(bg, 0));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    // 点を1つずつ生やす
+    if (count < MAX_N) {
+      acc += dt;
+      const rate = rm.matches ? 4000 : 240;   // 点/秒
+      const add = Math.floor(acc * rate);
+      if (add > 0) {
+        acc -= add / rate;
+        for (let k = 0; k < add && count < MAX_N; k++) { addPoint(); count++; }
+      }
+    }
+
+    // 目標位置へなめらかに補間
+    const lerp = rm.matches ? 1 : Math.min(1, dt * 8);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      p.x += (p.tx - p.x) * lerp;
+      p.y += (p.ty - p.y) * lerp;
+    }
+
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  function setAngle(v) {
+    angleDeg = v;
+    angleVal.textContent = v.toFixed(3) + "°";
+    updateTargets();
+  }
+  angleInput.addEventListener("input", () => setAngle(parseFloat(angleInput.value)));
+  document.getElementById("golden").addEventListener("click", () => {
+    angleInput.value = GOLDEN.toFixed(3);
+    setAngle(GOLDEN);
+  });
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+
+  resize(); readColors(); setAngle(GOLDEN);
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>グリッチの題</title>
+<meta name="pattern-title" content="グリッチの題">
+<meta name="pattern-desc" content="普段は静かな題字が、ホバーやクリックの瞬間だけ色ずれ・スライス・ノイズで乱れて戻る。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid; place-items: center;
+    height: 100dvh;
+  }
+  #stage {
+    position: relative;
+    padding: 2rem 2.4rem;
+    cursor: pointer;
+    user-select: none;
+    text-align: center;
+  }
+  .title {
+    position: relative;
+    font-size: clamp(2.4rem, 12vw, 6.2rem);
+    font-weight: 800;
+    letter-spacing: .04em;
+    line-height: 1.05;
+  }
+  /* RGB 分の重ね（色ずれ用のレイヤー） */
+  .layer {
+    position: absolute; inset: 0;
+    mix-blend-mode: screen;
+    pointer-events: none;
+    will-change: transform, clip-path, opacity;
+  }
+  :root[data-appearance="dark"] .layer { mix-blend-mode: screen; }
+  .base { position: relative; }
+  #sub {
+    margin-top: 1rem;
+    font-size: clamp(.74rem, 2.8vw, 1rem);
+    letter-spacing: .3em;
+    color: var(--color-fg-muted);
+    position: relative;
+  }
+  #noise { position: absolute; inset: 0; pointer-events: none; }
+  #hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    padding: .5rem 1.1rem; border-radius: 999px;
+    font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-muted);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage" role="button" tabindex="0" aria-label="題字に触れて乱す">
+  <div class="title">
+    <span class="layer" id="chA" aria-hidden="true">ゆらぎ</span>
+    <span class="layer" id="chB" aria-hidden="true">ゆらぎ</span>
+    <span class="base" id="base">ゆらぎ</span>
+    <canvas id="noise"></canvas>
+  </div>
+  <div id="sub">GLITCH / 揺 ら ぎ の 題</div>
+</div>
+<div id="hint">ホバー・クリックで 一瞬 乱れる</div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const root = document.documentElement;
+  const stage = document.getElementById("stage");
+  const chA = document.getElementById("chA");
+  const chB = document.getElementById("chB");
+  const base = document.getElementById("base");
+  const sub = document.getElementById("sub");
+  const canvas = document.getElementById("noise");
+  const ctx = canvas.getContext("2d");
+
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+  let COL = {};
+  function readColors() {
+    COL = {
+      c1: token("--color-accent-default", "#5bbcb1"),
+      c2: token("--color-status-error", "#ef5b5b"),
+      ink: token("--color-fg-primary", "#2c2a26"),
+    };
+    chA.style.color = COL.c1;   // 一方のチャンネルはティール
+    chB.style.color = COL.c2;   // もう一方はコーラル寄り
+  }
+  readColors();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    const r = canvas.parentElement.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = Math.max(1, Math.floor(W * DPR));
+    canvas.height = Math.max(1, Math.floor(H * DPR));
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+
+  // グリッチ強度: 通常 0、刺激で 1、指数減衰。時折 re-trigger で震わせる
+  let intensity = 0;
+  let nextBurst = 0;
+  function excite(amount) { intensity = Math.min(1.2, intensity + amount); }
+
+  stage.addEventListener("pointerenter", () => excite(0.7));
+  stage.addEventListener("pointerdown", () => excite(1.1));
+  stage.addEventListener("pointermove", () => { if (intensity < 0.15) excite(0.12); });
+  stage.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); excite(1.1); } });
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function clearGlitch() {
+    chA.style.transform = "none"; chA.style.opacity = "0";
+    chB.style.transform = "none"; chB.style.opacity = "0";
+    chA.style.clipPath = "none"; chB.style.clipPath = "none";
+    base.style.transform = "none"; base.style.clipPath = "none";
+    sub.style.transform = "none"; sub.style.opacity = "";
+    ctx.clearRect(0, 0, W, H);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    // 減衰（フレームレート非依存）
+    intensity *= Math.exp(-4.2 * dt);
+    if (intensity < 0.02) intensity = 0;
+
+    if (reduce.matches) {
+      // 動きを抑える: 触れた瞬間の色ずれだけ、静止
+      const s = intensity;
+      chA.style.opacity = String(s * 0.8);
+      chB.style.opacity = String(s * 0.8);
+      chA.style.transform = "translateX(" + (-3 * s) + "px)";
+      chB.style.transform = "translateX(" + (3 * s) + "px)";
+      requestAnimationFrame(frame);
+      return;
+    }
+
+    const g = intensity;
+    if (g > 0.01) {
+      // 時々ジャンプするような揺れ
+      const jitter = Math.random() < 0.6 ? 1 : 0;
+      const ox = rand(-1, 1) * 10 * g * jitter;
+      const oy = rand(-1, 1) * 3 * g * jitter;
+
+      // RGB 色ずれ
+      chA.style.opacity = String(0.55 + 0.4 * g);
+      chB.style.opacity = String(0.55 + 0.4 * g);
+      chA.style.transform = "translate(" + (ox - 4 * g) + "px," + oy + "px)";
+      chB.style.transform = "translate(" + (-ox + 4 * g) + "px," + (-oy) + "px)";
+
+      // 水平スライス（clip-path の帯を左右にずらす）
+      if (jitter) {
+        const y0 = rand(0, 82), h = rand(6, 20);
+        const shift = rand(-14, 14) * g;
+        base.style.transform = "translateX(" + shift + "px)";
+        base.style.clipPath = "polygon(0 " + y0 + "%, 100% " + y0 + "%, 100% " + (y0 + h) + "%, 0 " + (y0 + h) + "%)";
+        // 反対のスライスは元位置で見せるため 2 枚重ねの代わりに素早く戻す
+      } else {
+        base.style.transform = "none";
+        base.style.clipPath = "none";
+      }
+      // サブラベルも微震
+      sub.style.transform = "translateX(" + rand(-1, 1) * 6 * g + "px)";
+      sub.style.opacity = String(0.5 + Math.random() * 0.5 * g + 0.3);
+
+      // ノイズブロック
+      ctx.clearRect(0, 0, W, H);
+      const blocks = Math.round(g * 14);
+      for (let i = 0; i < blocks; i++) {
+        const bw = rand(8, 60), bh = rand(2, 8);
+        ctx.fillStyle = Math.random() < 0.5 ? COL.c1 : COL.c2;
+        ctx.globalAlpha = rand(0.12, 0.4) * g;
+        ctx.fillRect(rand(0, W - bw), rand(0, H - bh), bw, bh);
+      }
+      ctx.globalAlpha = 1;
+
+      // 稀に自発 re-trigger（触れている間の生っぽさ）
+      nextBurst -= dt;
+      if (nextBurst <= 0 && g > 0.25) { excite(rand(0.1, 0.35)); nextBurst = rand(0.05, 0.2); }
+    } else {
+      clearGlitch();
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  clearGlitch();
+  requestAnimationFrame((n) => { last = n; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

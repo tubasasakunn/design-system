@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="日食">
+<meta name="pattern-desc" content="月が太陽を横切り、皆既の瞬間にコロナとダイヤモンドリングが現れる。ドラッグで進行を操作でき、周囲の明るさも連動する。">
+<title>日食</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: ew-resize; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 74%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+  .phase {
+    position: fixed; bottom: 62px; left: 50%; transform: translateX(-50%);
+    font-size: .72rem; letter-spacing: .18em; color: var(--color-fg-muted);
+    pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="phase" id="phase"></div>
+<div class="hint">左右にドラッグして食を進める ─ 皆既の瞬間にコロナが立ちのぼる</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const phaseEl = document.getElementById("phase");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const mix = (a, b, t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const rgb = (c) => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const rgba = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const C = {};
+const refreshColors = () => {
+  C.sky   = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.sky2  = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.ink   = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.acc   = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.warm  = hexRgb(token("--color-status-warning", "#f0a830"));
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス ----
+let W = 0, H = 0;
+const resize = () => {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+window.addEventListener("resize", resize);
+resize();
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+// ---- 星（皆既で現れる）----
+const stars = [];
+for (let i = 0; i < 90; i++) stars.push({ x: Math.random(), y: Math.random() * 0.86, r: Math.random() * 1.1 + 0.3, tw: Math.random() * 6.28 });
+
+// ---- 進行状態 ----
+// progress 0..1 : 月が左から右へ太陽を横切る。0.5 で皆既（中心一致）。
+let progress = 0.5;
+let target = 0.5;
+let dragging = false, autoDir = 1;
+
+// ---- 二円の重なり面積（被覆率の計算） ----
+function overlapArea(r, R, d) {
+  if (d >= r + R) return 0;
+  if (d <= Math.abs(R - r)) return Math.PI * Math.min(r, R) ** 2;
+  const a1 = Math.acos((d*d + r*r - R*R) / (2*d*r));
+  const a2 = Math.acos((d*d + R*R - r*r) / (2*d*R));
+  return r*r*(a1 - Math.sin(2*a1)/2) + R*R*(a2 - Math.sin(2*a2)/2);
+}
+
+let prev = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - prev) / 1000); prev = now;
+
+  if (!dragging && !reduced) {
+    // 自動でゆっくり往復し「生きて」いる
+    target += autoDir * dt * 0.045;
+    if (target > 1) { target = 1; autoDir = -1; }
+    if (target < 0) { target = 0; autoDir = 1; }
+  }
+  progress += (target - progress) * Math.min(1, dt * 6);
+
+  const cx = W * 0.5, cy = H * 0.42;
+  const rSun = Math.min(W, H) * 0.15;
+  const rMoon = rSun * 1.045; // 月はわずかに大きく皆既を成す
+  // 月の中心は progress に応じ左→右。可動域は太陽を確実に覆い切る幅。
+  const span = (rSun + rMoon) * 1.9;
+  const mx = cx + (progress - 0.5) * span;
+  const my = cy - (rSun * 0.12); // わずかに斜めに横切る
+  const d = Math.hypot(mx - cx, my - cy);
+
+  const sunArea = Math.PI * rSun * rSun;
+  const covered = overlapArea(rSun, rMoon, d) / sunArea; // 0..1
+  const totality = d <= (rMoon - rSun); // 皆既
+
+  // 環境光：被覆に応じて空が暮れる
+  const dim = Math.pow(covered, 1.6);
+  const skyTop = mix(C.sky, mix(C.sky2, C.ink, 0.7), dim * 0.94);
+  const skyBot = mix(C.sky2, mix(C.ink, C.acc, 0.22), dim * 0.9);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, rgb(skyTop));
+  g.addColorStop(1, rgb(skyBot));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // 星（暮れるほど見える）
+  if (dim > 0.35) {
+    const sa = (dim - 0.35) / 0.65;
+    for (const s of stars) {
+      const tw = 0.55 + 0.45 * Math.sin(now * 0.002 + s.tw);
+      ctx.fillStyle = rgba([255, 252, 240], sa * tw * 0.8);
+      ctx.beginPath(); ctx.arc(s.x * W, s.y * H, s.r, 0, 6.283); ctx.fill();
+    }
+  }
+
+  // 地平の淡いかすみ
+  const haze = ctx.createLinearGradient(0, H * 0.72, 0, H);
+  haze.addColorStop(0, rgba(mix(C.warm, C.sky2, 0.4), 0));
+  haze.addColorStop(1, rgba(mix(C.warm, C.sky2, 0.4), 0.14 * (1 - dim * 0.6)));
+  ctx.fillStyle = haze; ctx.fillRect(0, H * 0.72, W, H * 0.28);
+
+  // ---- コロナ（皆既近傍で立ちのぼる） ----
+  const coronaAmt = Math.max(0, (covered - 0.965) / 0.035);
+  if (coronaAmt > 0) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    // やわらかな外周グロー
+    const gl = ctx.createRadialGradient(cx, cy, rSun * 0.9, cx, cy, rSun * 2.7);
+    gl.addColorStop(0, rgba([255, 250, 236], 0.32 * coronaAmt));
+    gl.addColorStop(0.5, rgba(mix([255,250,236], C.acc, 0.35), 0.12 * coronaAmt));
+    gl.addColorStop(1, rgba([255, 250, 236], 0));
+    ctx.fillStyle = gl;
+    ctx.beginPath(); ctx.arc(cx, cy, rSun * 2.7, 0, 6.283); ctx.fill();
+    // 放射状のストリーマー
+    const rays = 48;
+    for (let i = 0; i < rays; i++) {
+      const a = (i / rays) * 6.283;
+      const flick = 0.55 + 0.45 * Math.sin(now * 0.0016 + i * 2.3) * (reduced ? 0 : 1) + (reduced ? 0.45 : 0);
+      const len = rSun * (0.55 + 0.9 * (0.5 + 0.5 * Math.sin(i * 12.9898) ));
+      const x1 = cx + Math.cos(a) * rMoon * 0.98;
+      const y1 = cy + Math.sin(a) * rMoon * 0.98;
+      const x2 = cx + Math.cos(a) * (rMoon + len);
+      const y2 = cy + Math.sin(a) * (rMoon + len);
+      const lg = ctx.createLinearGradient(x1, y1, x2, y2);
+      lg.addColorStop(0, rgba([255, 251, 240], 0.5 * coronaAmt * flick));
+      lg.addColorStop(1, rgba([255, 251, 240], 0));
+      ctx.strokeStyle = lg;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---- 太陽本体 ----
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  const halo = ctx.createRadialGradient(cx, cy, rSun * 0.3, cx, cy, rSun * 2.2);
+  const haloA = 0.5 * (1 - covered * 0.8);
+  halo.addColorStop(0, rgba([255, 244, 220], haloA));
+  halo.addColorStop(0.35, rgba(mix([255,244,220], C.warm, 0.5), haloA * 0.6));
+  halo.addColorStop(1, rgba(C.warm, 0));
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(cx, cy, rSun * 2.2, 0, 6.283); ctx.fill();
+  ctx.restore();
+
+  // 太陽ディスク
+  const disc = ctx.createRadialGradient(cx - rSun*0.2, cy - rSun*0.2, rSun*0.1, cx, cy, rSun);
+  disc.addColorStop(0, "rgb(255,253,246)");
+  disc.addColorStop(0.7, rgb(mix([255,246,224], C.warm, 0.35)));
+  disc.addColorStop(1, rgb(mix(C.warm, C.ink, 0.1)));
+  ctx.fillStyle = disc;
+  ctx.beginPath(); ctx.arc(cx, cy, rSun, 0, 6.283); ctx.fill();
+
+  // ---- 月（食の影） ----
+  // 空色でマスクして「欠け」を作る
+  ctx.save();
+  const moonShade = mix(skyTop, C.ink, 0.35 + dim * 0.4);
+  const md = ctx.createRadialGradient(mx - rMoon*0.25, my - rMoon*0.25, rMoon*0.2, mx, my, rMoon);
+  md.addColorStop(0, rgb(mix(moonShade, C.ink, 0.15)));
+  md.addColorStop(1, rgb(moonShade));
+  ctx.fillStyle = md;
+  ctx.beginPath(); ctx.arc(mx, my, rMoon, 0, 6.283); ctx.fill();
+  ctx.restore();
+
+  // ---- ダイヤモンドリング（第2・第3接触の直前直後） ----
+  // 皆既に入る/出る境目で、残った一片が宝石のように輝く
+  const edge = Math.abs(d - (rMoon - rSun)); // 内接からのずれ
+  const ringWin = rSun * 0.16;
+  const nearContact = (d < rMoon - rSun * 0.55) && (d > rMoon - rSun * 1.02);
+  if (nearContact) {
+    const k = 1 - Math.min(1, edge / ringWin);
+    if (k > 0.02) {
+      // 残る光の一片の位置：月中心から太陽中心へ向かう向きの、太陽の縁
+      const ux = (cx - mx) / (d || 1), uy = (cy - my) / (d || 1);
+      const bx = cx + ux * rSun, by = cy + uy * rSun;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const bead = ctx.createRadialGradient(bx, by, 0, bx, by, rSun * (0.5 + k * 0.7));
+      bead.addColorStop(0, rgba([255, 255, 250], 0.95 * k));
+      bead.addColorStop(0.25, rgba([255, 250, 235], 0.7 * k));
+      bead.addColorStop(1, rgba(C.warm, 0));
+      ctx.fillStyle = bead;
+      ctx.beginPath(); ctx.arc(bx, by, rSun * (0.5 + k * 0.7), 0, 6.283); ctx.fill();
+      // 十字のきらめき
+      ctx.strokeStyle = rgba([255,255,252], 0.85 * k);
+      ctx.lineWidth = 1.3;
+      const fl = rSun * (0.6 + k * 0.9);
+      for (const [dx, dy] of [[1,0],[0,1]]) {
+        const lg = ctx.createLinearGradient(bx - dx*fl, by - dy*fl, bx + dx*fl, by + dy*fl);
+        lg.addColorStop(0, rgba([255,255,252],0));
+        lg.addColorStop(0.5, rgba([255,255,252], 0.9 * k));
+        lg.addColorStop(1, rgba([255,255,252],0));
+        ctx.strokeStyle = lg;
+        ctx.beginPath(); ctx.moveTo(bx - dx*fl, by - dy*fl); ctx.lineTo(bx + dx*fl, by + dy*fl); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // 位相ラベル
+  let label;
+  if (totality) label = "皆 既";
+  else if (covered > 0.9) label = "ダイヤモンドリング";
+  else if (covered > 0.02) label = "部分食  被覆 " + Math.round(covered * 100) + "%";
+  else label = "第一接触前";
+  phaseEl.textContent = label;
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---- 入力 ----
+function setFromX(clientX) {
+  target = Math.max(0, Math.min(1, clientX / W));
+}
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true;
+  canvas.setPointerCapture?.(e.pointerId);
+  setFromX(e.clientX);
+});
+canvas.addEventListener("pointermove", (e) => { if (dragging) setFromX(e.clientX); });
+const end = () => { dragging = false; };
+canvas.addEventListener("pointerup", end);
+canvas.addEventListener("pointercancel", end);
+})();
+</script>
+</body>
+</html>

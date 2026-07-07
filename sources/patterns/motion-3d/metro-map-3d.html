@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="地下鉄 3D マップ">
+<meta name="pattern-desc" content="透視投影とドラッグ回転で覗き込む架空の地下鉄網。深さの違う路線を列車の光が走り続ける。">
+<title>地下鉄 3D マップ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 320px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>地下鉄 3D マップ</h1>
+  <p>ドラッグで回転、ホイール／ピンチでズーム。地下 1〜3 層に重なる路線を、列車の光が行き交います。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // ---- デザイントークン（cream light をフォールバックに）----
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  let col = {};
+  function readColors() {
+    col = {
+      fg: token("--color-fg-primary", "#2c2a26"),
+      muted: token("--color-fg-muted", "#a79f91"),
+      elevated: token("--color-bg-elevated", "#fffdf9"),
+      border: token("--color-border-strong", "#ddd5c6"),
+    };
+  }
+
+  // ---- 路線データ（x,z の折れ線 / y = 地下の深さ）。角は 3D 上で丸める ----
+  const LINES = [
+    { name: "環状線",  color: "#5bbcb1", y: 0.0,  pts: [[-9,0],[-4,0],[-1,-3],[3,-3],[6,0],[9,0]] },
+    { name: "花見線",  color: "#f0a8bd", y: -0.8, pts: [[-8,4],[-4,4],[0,0],[4,-4],[8,-4]] },
+    { name: "山手線",  color: "#f1d189", y: -1.6, pts: [[-6,-6],[-6,-2],[-2,2],[-2,6]] },
+    { name: "月光線",  color: "#bcb2e8", y: -2.4, pts: [[2,-7],[2,-2],[5,1],[5,6]] },
+    { name: "海風線",  color: "#f3a890", y: -0.8, pts: [[-9,-4],[-5,-4],[1,2],[1,6]] },
+  ];
+  const LABELS = [
+    { x: 0, z: 0, y: -0.8, t: "中央" }, { x: -4, z: 0, y: 0, t: "桜が丘" },
+    { x: 6, z: 0, y: 0, t: "港南" }, { x: -6, z: -6, y: -1.6, t: "白樺台" },
+    { x: 2, z: -7, y: -2.4, t: "泉町" }, { x: -2, z: 6, y: -1.6, t: "大橋" },
+  ];
+
+  // 折れ線の角を二次ベジェで丸め、密な 3D 点列にする
+  function roundPath(pts, y, r = 1.0, seg = 8) {
+    const out = [];
+    const P = pts.map(([x, z]) => ({ x, y, z }));
+    out.push(P[0]);
+    for (let i = 1; i < P.length - 1; i++) {
+      const a = P[i - 1], b = P[i], c = P[i + 1];
+      const l1 = Math.hypot(b.x - a.x, b.z - a.z), l2 = Math.hypot(c.x - b.x, c.z - b.z);
+      const t1 = Math.min(r / l1, 0.42), t2 = Math.min(r / l2, 0.42);
+      const p1 = { x: b.x + (a.x - b.x) * t1, y, z: b.z + (a.z - b.z) * t1 };
+      const p2 = { x: b.x + (c.x - b.x) * t2, y, z: b.z + (c.z - b.z) * t2 };
+      out.push(p1);
+      for (let k = 1; k < seg; k++) { // 二次ベジェ（制御点 = 角）
+        const t = k / seg, u = 1 - t;
+        out.push({
+          x: u * u * p1.x + 2 * u * t * b.x + t * t * p2.x,
+          y,
+          z: u * u * p1.z + 2 * u * t * b.z + t * t * p2.z,
+        });
+      }
+      out.push(p2);
+    }
+    out.push(P[P.length - 1]);
+    return out;
+  }
+
+  for (const L of LINES) {
+    L.path = roundPath(L.pts, L.y);
+    // 弧長テーブル（列車の等速走行用）
+    L.cum = [0];
+    for (let i = 1; i < L.path.length; i++) {
+      const a = L.path[i - 1], b = L.path[i];
+      L.cum.push(L.cum[i - 1] + Math.hypot(b.x - a.x, b.z - a.z));
+    }
+    L.len = L.cum[L.cum.length - 1];
+    L.stations = L.pts.map(([x, z]) => ({ x, y: L.y, z }));
+    L.trains = [
+      { s: Math.random() * L.len, dir: 1 },
+      { s: Math.random() * L.len, dir: -1 },
+    ];
+  }
+  // 弧長 s → 3D 座標
+  function pointAt(L, s) {
+    s = ((s % L.len) + L.len) % L.len;
+    let lo = 0, hi = L.cum.length - 1;
+    while (lo < hi - 1) { const m = (lo + hi) >> 1; (L.cum[m] <= s) ? lo = m : hi = m; }
+    const t = (s - L.cum[lo]) / (L.cum[lo + 1] - L.cum[lo] || 1);
+    const a = L.path[lo], b = L.path[lo + 1];
+    return { x: a.x + (b.x - a.x) * t, y: a.y, z: a.z + (b.z - a.z) * t };
+  }
+
+  // ---- カメラ（軌道）と透視投影（自前実装）----
+  let yaw = -0.65, pitch = 0.62, dist = 21, vyaw = 0, vpitch = 0;
+  let W = 0, H = 0, F = 500;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    F = Math.min(W, H) * 0.92;
+  }
+  // ワールド → 画面。回転行列（yaw→pitch）→ 平行移動 → 透視除算
+  function project(p) {
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const cx = Math.cos(pitch), sx = Math.sin(pitch);
+    const x1 = p.x * cy - p.z * sy, z1 = p.x * sy + p.z * cy;
+    const y2 = p.y * cx - z1 * sx, z2 = p.y * sx + z1 * cx;
+    const zc = z2 + dist;
+    if (zc < 0.5) return null;
+    const s = F / zc;
+    return { x: W / 2 + x1 * s, y: H / 2 + 0.6 * H * 0.06 - y2 * s, s, zc };
+  }
+
+  // ---- 描画 ----
+  const hexRgb = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+  };
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    const isDark = document.documentElement.dataset.appearance === "dark";
+
+    // 地表グリッド（y=+0.6 の街路面）— うっすら
+    ctx.strokeStyle = col.border;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.35;
+    ctx.setLineDash([2, 6]);
+    for (let g = -10; g <= 10; g += 2.5) {
+      let a = project({ x: g, y: 0.6, z: -10 }), b = project({ x: g, y: 0.6, z: 10 });
+      if (a && b) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+      a = project({ x: -10, y: 0.6, z: g }); b = project({ x: 10, y: 0.6, z: g });
+      if (a && b) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    // 奥の路線から描く（カメラ空間 z の平均でソート）
+    const order = LINES.map((L) => {
+      let z = 0, n = 0;
+      for (let i = 0; i < L.path.length; i += 6) { const p = project(L.path[i]); if (p) { z += p.zc; n++; } }
+      return { L, z: n ? z / n : 1e9 };
+    }).sort((a, b) => b.z - a.z);
+
+    for (const { L } of order) {
+      const rgb = hexRgb(L.color);
+      // 駅から地表へ立ち上がる細い縦線（深さの手がかり）
+      ctx.lineWidth = 1;
+      for (const st of L.stations) {
+        const a = project(st), b = project({ x: st.x, y: 0.6, z: st.z });
+        if (!a || !b) continue;
+        ctx.strokeStyle = `rgba(${rgb},0.22)`;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+      // 路線本体（セグメント毎に奥行きで太さ・濃さを変える）
+      ctx.lineCap = "round";
+      let prev = project(L.path[0]);
+      for (let i = 1; i < L.path.length; i++) {
+        const cur = project(L.path[i]);
+        if (prev && cur) {
+          const depth = (prev.s + cur.s) / 2;
+          ctx.lineWidth = Math.max(1.2, depth * 0.11);
+          ctx.strokeStyle = `rgba(${rgb},${Math.min(1, 0.35 + depth * 0.011)})`;
+          ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(cur.x, cur.y); ctx.stroke();
+        }
+        prev = cur;
+      }
+      // 駅ノード
+      for (const st of L.stations) {
+        const p = project(st);
+        if (!p) continue;
+        const r = Math.max(2, p.s * 0.075);
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = col.elevated; ctx.fill();
+        ctx.lineWidth = Math.max(1, r * 0.42);
+        ctx.strokeStyle = L.color; ctx.stroke();
+      }
+      // 列車（進行方向へ淡い尾を引く光点）
+      for (const tr of L.trains) {
+        const p3 = pointAt(L, tr.s), p = project(p3);
+        if (!p) continue;
+        for (let k = 1; k <= 4; k++) {
+          const q = project(pointAt(L, tr.s - tr.dir * k * 0.28));
+          if (!q) continue;
+          ctx.beginPath(); ctx.arc(q.x, q.y, Math.max(1, q.s * 0.05 * (1 - k / 5)), 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${rgb},${0.35 * (1 - k / 5)})`; ctx.fill();
+        }
+        const r = Math.max(2.2, p.s * 0.062);
+        const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3.2);
+        glow.addColorStop(0, `rgba(${rgb},${isDark ? 0.5 : 0.35})`);
+        glow.addColorStop(1, `rgba(${rgb},0)`);
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r * 3.2, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = L.color; ctx.fill();
+        ctx.lineWidth = 1; ctx.strokeStyle = col.elevated; ctx.stroke();
+      }
+    }
+
+    // 駅名ラベル（地表側に浮かせる）
+    ctx.textAlign = "center";
+    for (const lb of LABELS) {
+      const p = project({ x: lb.x, y: 0.72, z: lb.z });
+      if (!p) continue;
+      const a = Math.min(1, Math.max(0, (p.s - 18) / 30));
+      if (a <= 0.02) continue;
+      ctx.font = `${Math.max(9, p.s * 0.34)}px system-ui, sans-serif`;
+      ctx.globalAlpha = a * 0.85;
+      ctx.fillStyle = col.muted;
+      ctx.fillText(lb.t, p.x, p.y - 4);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---- 入力（ポインタ＝マウス／タッチ、慣性つき回転）----
+  let dragging = false, px = 0, py = 0, lastMove = 0;
+  const pinch = new Map();
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pinch.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    dragging = true; px = e.clientX; py = e.clientY;
+    vyaw = vpitch = 0;
+    canvas.classList.add("dragging");
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    if (pinch.size >= 2) { // ピンチズーム
+      const pts = [...pinch.values()];
+      const d0 = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      pinch.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const pts2 = [...pinch.values()];
+      const d1 = Math.hypot(pts2[0].x - pts2[1].x, pts2[0].y - pts2[1].y);
+      if (d0 > 0) dist = Math.min(42, Math.max(9, dist * d0 / d1));
+      return;
+    }
+    pinch.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const dx = e.clientX - px, dy = e.clientY - py;
+    px = e.clientX; py = e.clientY;
+    yaw += dx * 0.0052;
+    pitch = Math.min(1.35, Math.max(0.12, pitch + dy * 0.0042));
+    vyaw = dx * 0.0052 * 60; vpitch = dy * 0.0042 * 60;
+    lastMove = performance.now();
+  });
+  const release = (e) => {
+    pinch.delete(e.pointerId);
+    if (pinch.size === 0) { dragging = false; canvas.classList.remove("dragging"); }
+  };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    dist = Math.min(42, Math.max(9, dist * Math.exp(e.deltaY * 0.0011)));
+  }, { passive: false });
+
+  // ---- メインループ（デルタ時間でフレームレート非依存）----
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+    if (!dragging) {
+      // 慣性 → ゆるやかな自動回遊（reduce では停止）
+      yaw += vyaw * dt;
+      pitch = Math.min(1.35, Math.max(0.12, pitch + vpitch * dt));
+      const f = Math.exp(-dt * 3.2);
+      vyaw *= f; vpitch *= f;
+      if (!rm.matches && Math.abs(vyaw) < 0.02) yaw += 0.045 * dt;
+    }
+    if (!rm.matches || dragging) {
+      const spd = rm.matches ? 0 : 1.35;
+      for (const L of LINES) for (const tr of L.trains) tr.s += tr.dir * spd * dt;
+    }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

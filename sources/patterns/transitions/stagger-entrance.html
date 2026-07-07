@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="時差の入場">
+<meta name="pattern-desc" content="グリッドのカードがクリック地点からの距離順など、選んだ順序で波状の時差をつけて入場・退場する。">
+<title>時差の入場</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .stage { height: 100dvh; display: flex; flex-direction: column; }
+  header { padding: 60px 24px 6px; text-align: center; }
+  header h1 { font-size: 1.05rem; font-weight: 600; letter-spacing: .06em; }
+  header p { margin-top: 6px; font-size: .78rem; color: var(--color-fg-muted); }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+    padding: 14px 20px 4px;
+  }
+  .controls button {
+    font: inherit; font-size: .78rem; cursor: pointer;
+    padding: .42rem .9rem; border-radius: 999px;
+    color: var(--color-fg-secondary);
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    transition: background .2s, color .2s, border-color .2s;
+  }
+  .controls button:hover { border-color: var(--color-border-strong); }
+  .controls button.active {
+    color: var(--color-accent-fg);
+    background: var(--color-accent-default);
+    border-color: var(--color-accent-default);
+  }
+  .controls .sep { width: 1px; align-self: stretch; background: var(--color-border-default); margin: 2px 4px; }
+  .controls button.play { color: var(--color-accent-default); border-color: var(--color-accent-default); }
+  .grid {
+    flex: 1; min-height: 0;
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(var(--cols), 1fr);
+    align-content: center;
+    padding: 18px clamp(18px, 5vw, 70px) 46px;
+  }
+  .cell {
+    border-radius: 18px; aspect-ratio: 1 / 1;
+    border: 1px solid var(--color-border-default);
+    background:
+      radial-gradient(120% 120% at 30% 22%, color-mix(in srgb, var(--tint) 34%, var(--color-bg-elevated)), color-mix(in srgb, var(--tint) 82%, var(--color-bg-secondary)));
+    box-shadow: 0 4px 14px rgba(40,35,25,.05);
+    opacity: 0;
+    transform: translateY(26px) scale(.86);
+    transition:
+      opacity var(--dur, 520ms) cubic-bezier(.22,1,.36,1),
+      transform var(--dur, 520ms) cubic-bezier(.22,1,.36,1);
+    transition-delay: var(--delay, 0ms);
+    will-change: transform, opacity;
+  }
+  .cell.in { opacity: 1; transform: translateY(0) scale(1); }
+  .hint {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    font-size: .74rem; color: var(--color-fg-muted); pointer-events: none;
+    padding: 6px 14px; border-radius: 999px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    border: 1px solid var(--color-border-default);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cell { transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <header>
+    <h1>時差の入場</h1>
+    <p>並びに沿って少しずつ遅れて現れる。順序を選び、グリッドに触れて再生。</p>
+  </header>
+  <div class="controls" id="controls">
+    <button data-mode="distance" class="active">クリック地点から</button>
+    <button data-mode="row">上から</button>
+    <button data-mode="col">左から</button>
+    <button data-mode="diagonal">斜めに</button>
+    <button data-mode="center">中心から</button>
+    <button data-mode="random">ランダム</button>
+    <span class="sep"></span>
+    <button class="play" id="replay">再生 ▷</button>
+  </div>
+  <div class="grid" id="grid"></div>
+</div>
+<div class="hint">グリッドをクリックすると、その点を起点に入場します</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const grid = document.getElementById("grid");
+  const controls = document.getElementById("controls");
+
+  const tints = ["#5bbcb1","#f0a8bd","#f1d189","#bcb2e8","#f3a890","#9fc8ea","#a9dcc0","#f0a830"];
+  const COLS = 6, ROWS = 5, N = COLS * ROWS;
+  grid.style.setProperty("--cols", COLS);
+  const cells = [];
+  for (let i = 0; i < N; i++) {
+    const el = document.createElement("div");
+    el.className = "cell";
+    el.style.setProperty("--tint", tints[i % tints.length]);
+    el._r = Math.floor(i / COLS);
+    el._c = i % COLS;
+    grid.appendChild(el);
+    cells.push(el);
+  }
+
+  let mode = "distance";
+  let origin = { x: 0.5, y: 0.5 }; // 正規化されたクリック起点
+
+  // 各セルの「順位」を算出（0 が最初）
+  function ranks() {
+    const key = new Map();
+    for (const el of cells) {
+      const nx = (el._c + 0.5) / COLS, ny = (el._r + 0.5) / ROWS;
+      let k;
+      switch (mode) {
+        case "row": k = el._r * COLS + el._c; break;
+        case "col": k = el._c * ROWS + el._r; break;
+        case "diagonal": k = el._r + el._c; break;
+        case "center": k = Math.hypot(nx - 0.5, ny - 0.5); break;
+        case "random": k = el._rand ?? (el._rand = Math.random()); break;
+        case "distance":
+        default: k = Math.hypot(nx - origin.x, ny - origin.y); break;
+      }
+      key.set(el, k);
+    }
+    // 順位に正規化（0..N-1 相当の連番）
+    const sorted = [...cells].sort((a, b) => key.get(a) - key.get(b));
+    const rank = new Map();
+    sorted.forEach((el, i) => rank.set(el, i));
+    return rank;
+  }
+
+  let token = 0; // 再生のたびに更新して古いタイマーを無効化
+  function assignDelays(reverse) {
+    const rank = ranks();
+    const step = rm.matches ? 0 : 34;    // 1 ランクあたりの遅延(ms)
+    const dur = rm.matches ? 10 : 520;
+    for (const el of cells) {
+      let r = rank.get(el);
+      if (reverse) r = (N - 1) - r;
+      el.style.setProperty("--dur", dur + "ms");
+      el.style.setProperty("--delay", r * step + "ms");
+    }
+    return (N - 1) * step + dur;
+  }
+
+  function play() {
+    const my = ++token;
+    // まず全て退場状態へ（遅延なしで即リセット）
+    cells.forEach((el) => { el.style.transitionDelay = "0ms"; el.classList.remove("in"); });
+    // reflow して確実に初期状態を確定
+    void grid.offsetWidth;
+    const total = assignDelays(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (my !== token) return;
+      cells.forEach((el) => el.classList.add("in"));
+    }));
+  }
+
+  // 退場 → 入場の往復再生
+  function replay() {
+    const my = ++token;
+    if (!cells[0].classList.contains("in")) { play(); return; }
+    const outTotal = assignDelays(true);
+    cells.forEach((el) => el.classList.remove("in"));
+    setTimeout(() => {
+      if (my !== token) return;
+      play();
+    }, rm.matches ? 20 : Math.min(outTotal, 700));
+  }
+
+  controls.querySelectorAll("button[data-mode]").forEach((b) => {
+    b.addEventListener("click", () => {
+      controls.querySelectorAll("button[data-mode]").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      mode = b.dataset.mode;
+      play();
+    });
+  });
+  document.getElementById("replay").addEventListener("click", replay);
+
+  grid.addEventListener("pointerdown", (e) => {
+    const rc = grid.getBoundingClientRect();
+    origin = {
+      x: Math.min(1, Math.max(0, (e.clientX - rc.left) / rc.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - rc.top) / rc.height)),
+    };
+    if (mode !== "distance") {
+      mode = "distance";
+      controls.querySelectorAll("button[data-mode]").forEach((x) => x.classList.toggle("active", x.dataset.mode === "distance"));
+    }
+    play();
+  });
+
+  // 初回入場
+  requestAnimationFrame(() => requestAnimationFrame(play));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="流れる等高線">
+<meta name="pattern-desc" content="時間で変形するフラクタルノイズ地形の等高線を marching squares で抽出して描く地図。標高で線の濃さが変わり、数字のラベルも添える。">
+<title>流れる等高線</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 320px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>流れる等高線</h1>
+  <p>ゆっくり変形する地形の等高線です。マウス・タッチで地形を隆起させられます。高い所ほど線が濃く、標高の数字が添えられます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let bg, low, high, accent, label;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    low = hex(token("--color-border-strong", "#ddd5c6"));
+    high = hex(token("--color-fg-secondary", "#6c655b"));
+    accent = hex(token("--color-accent-default", "#5bbcb1"));
+    label = hex(token("--color-fg-muted", "#a79f91"));
+  }
+
+  // ---- 値ノイズ（格子でハッシュ→smoothstep 補間, 2 オクターブ + 時間軸）----
+  const perm = new Uint8Array(512);
+  (function initPerm() {
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    let s = 1234567;
+    for (let i = 255; i > 0; i--) { s = (s * 1103515245 + 12345) & 0x7fffffff; const j = s % (i + 1); const t = p[i]; p[i] = p[j]; p[j] = t; }
+    for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+  })();
+  const fade = (t) => t * t * (3 - 2 * t);
+  function hash3(xi, yi, zi) {
+    return (perm[(perm[(perm[xi & 255] + yi) & 255] + zi) & 255]) / 255;
+  }
+  function vnoise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = fade(xf), v = fade(yf), w = fade(zf);
+    const c000 = hash3(xi, yi, zi), c100 = hash3(xi + 1, yi, zi);
+    const c010 = hash3(xi, yi + 1, zi), c110 = hash3(xi + 1, yi + 1, zi);
+    const c001 = hash3(xi, yi, zi + 1), c101 = hash3(xi + 1, yi, zi + 1);
+    const c011 = hash3(xi, yi + 1, zi + 1), c111 = hash3(xi + 1, yi + 1, zi + 1);
+    const x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+    const x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+    const y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+    return y0 + (y1 - y0) * w;
+  }
+  function fbm(x, y, z) {
+    let f = 0, amp = 0.6, freq = 1, norm = 0;
+    for (let o = 0; o < 3; o++) { f += vnoise(x * freq, y * freq, z) * amp; norm += amp; amp *= 0.5; freq *= 2.1; }
+    return f / norm;
+  }
+
+  let W = 0, H = 0, step = 18, gw = 0, gh = 0;
+  let field = new Float32Array(0);
+  const SCALE = 0.006; // ノイズの空間周波数
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    step = Math.max(14, Math.round(Math.min(W, H) / 46));
+    gw = Math.ceil(W / step) + 1;
+    gh = Math.ceil(H / step) + 1;
+    field = new Float32Array(gw * gh);
+  }
+
+  // ---- ポインタで隆起する山（減衰する隆起の集合）----
+  const bumps = [];
+  canvas.addEventListener("pointerdown", (e) => addBump(e.clientX, e.clientY));
+  canvas.addEventListener("pointermove", (e) => { if (e.pressure > 0 || e.buttons) addBump(e.clientX, e.clientY, 0.4); });
+  function addBump(x, y, s = 1) {
+    bumps.push({ x, y, amp: 0.5 * s, r: 120 + Math.random() * 80, life: 1 });
+    if (bumps.length > 40) bumps.shift();
+  }
+
+  let z = 0;
+  function sampleField(dt) {
+    z += dt * (rm.matches ? 0 : 0.12);
+    for (const b of bumps) b.life -= dt * 0.12;
+    for (let i = bumps.length - 1; i >= 0; i--) if (bumps[i].life <= 0) bumps.splice(i, 1);
+    for (let j = 0; j < gh; j++) {
+      const py = j * step;
+      for (let i = 0; i < gw; i++) {
+        const px = i * step;
+        let h = fbm(px * SCALE, py * SCALE, z);
+        for (const b of bumps) {
+          const d2 = (px - b.x) * (px - b.x) + (py - b.y) * (py - b.y);
+          h += b.amp * b.life * Math.exp(-d2 / (b.r * b.r));
+        }
+        field[j * gw + i] = h;
+      }
+    }
+  }
+
+  // marching squares の辺上補間点
+  function lerpEdge(x1, y1, v1, x2, y2, v2, lv) {
+    const t = (lv - v1) / (v2 - v1 || 1e-6);
+    return [x1 + (x2 - x1) * t, y1 + (y2 - y1) * t];
+  }
+
+  // 1 つの等高レベルを marching squares で描く
+  function drawLevel(lv, strength) {
+    ctx.beginPath();
+    for (let j = 0; j < gh - 1; j++) {
+      for (let i = 0; i < gw - 1; i++) {
+        const x = i * step, y = j * step;
+        const tl = field[j * gw + i], tr = field[j * gw + i + 1];
+        const bl = field[(j + 1) * gw + i], br = field[(j + 1) * gw + i + 1];
+        let idx = 0;
+        if (tl > lv) idx |= 8;
+        if (tr > lv) idx |= 4;
+        if (br > lv) idx |= 2;
+        if (bl > lv) idx |= 1;
+        if (idx === 0 || idx === 15) continue;
+        const top = () => lerpEdge(x, y, tl, x + step, y, tr, lv);
+        const right = () => lerpEdge(x + step, y, tr, x + step, y + step, br, lv);
+        const bot = () => lerpEdge(x, y + step, bl, x + step, y + step, br, lv);
+        const left = () => lerpEdge(x, y, tl, x, y + step, bl, lv);
+        const seg = (a, b) => { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); };
+        switch (idx) {
+          case 1: case 14: seg(left(), bot()); break;
+          case 2: case 13: seg(bot(), right()); break;
+          case 3: case 12: seg(left(), right()); break;
+          case 4: case 11: seg(top(), right()); break;
+          case 6: case 9: seg(top(), bot()); break;
+          case 7: case 8: seg(left(), top()); break;
+          case 5: seg(left(), top()); seg(bot(), right()); break;   // 鞍点
+          case 10: seg(left(), bot()); seg(top(), right()); break;
+        }
+      }
+    }
+    const col = mix(low, high, strength);
+    ctx.strokeStyle = rgba(col, 0.35 + strength * 0.55);
+    ctx.lineWidth = 0.8 + strength * 1.1;
+    ctx.stroke();
+  }
+
+  const LEVELS = 11;
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = rgba(bg, 1);
+    ctx.fillRect(0, 0, W, H);
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+
+    // レベルは 0..1 の範囲を等間隔に
+    for (let l = 1; l < LEVELS; l++) {
+      const frac = l / LEVELS;
+      const lv = frac;
+      // アクセント色は主要標高(中央付近)だけ軽く強調
+      if (l === Math.round(LEVELS * 0.62)) {
+        // 一本だけティールで基準線
+        ctx.beginPath();
+        drawLevelPath(lv);
+        ctx.strokeStyle = rgba(accent, 0.7);
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      } else {
+        drawLevel(lv, frac);
+      }
+    }
+    drawLabels();
+  }
+
+  // ラベル配置用に、レベルのパスだけ引く（塗りなし・stroke は呼び出し側）
+  function drawLevelPath(lv) {
+    for (let j = 0; j < gh - 1; j++) {
+      for (let i = 0; i < gw - 1; i++) {
+        const x = i * step, y = j * step;
+        const tl = field[j * gw + i], tr = field[j * gw + i + 1];
+        const bl = field[(j + 1) * gw + i], br = field[(j + 1) * gw + i + 1];
+        let idx = 0;
+        if (tl > lv) idx |= 8; if (tr > lv) idx |= 4; if (br > lv) idx |= 2; if (bl > lv) idx |= 1;
+        if (idx === 0 || idx === 15) continue;
+        const top = () => lerpEdge(x, y, tl, x + step, y, tr, lv);
+        const right = () => lerpEdge(x + step, y, tr, x + step, y + step, br, lv);
+        const bot = () => lerpEdge(x, y + step, bl, x + step, y + step, br, lv);
+        const left = () => lerpEdge(x, y, tl, x, y + step, bl, lv);
+        const seg = (a, b) => { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); };
+        switch (idx) {
+          case 1: case 14: seg(left(), bot()); break;
+          case 2: case 13: seg(bot(), right()); break;
+          case 3: case 12: seg(left(), right()); break;
+          case 4: case 11: seg(top(), right()); break;
+          case 6: case 9: seg(top(), bot()); break;
+          case 7: case 8: seg(left(), top()); break;
+          case 5: seg(left(), top()); seg(bot(), right()); break;
+          case 10: seg(left(), bot()); seg(top(), right()); break;
+        }
+      }
+    }
+  }
+
+  // 標高ラベル: 格子を粗く走査し、あるレベルに近いセルへ数字を置く
+  function drawLabels() {
+    ctx.font = "600 10px system-ui, sans-serif";
+    ctx.fillStyle = rgba(label, 0.9);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const gapX = Math.max(6, Math.round(gw / 7));
+    const gapY = Math.max(5, Math.round(gh / 6));
+    for (let j = 2; j < gh - 2; j += gapY) {
+      for (let i = 2; i < gw - 2; i += gapX) {
+        const h = field[j * gw + i];
+        // 近い等高レベルを見つけて標高値(m 相当)を表示
+        const lv = Math.round(h * LEVELS) / LEVELS;
+        if (Math.abs(h - lv) > 0.02) continue;
+        if (lv <= 0.05 || lv >= 0.98) continue;
+        const meters = Math.round(lv * 800 + 100);
+        const px = i * step, py = j * step;
+        // 数字は等高線に沿わせるため、勾配方向に少し回す
+        const gx = field[j * gw + i + 1] - field[j * gw + i - 1];
+        const gy = field[(j + 1) * gw + i] - field[(j - 1) * gw + i];
+        const ang = Math.atan2(gy, gx) + Math.PI / 2;
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(((ang + Math.PI) % Math.PI) - Math.PI / 2 > Math.PI / 2 ? ang - Math.PI : ang);
+        // 背景を軽く抜いて可読性
+        ctx.fillStyle = rgba(bg, 0.75);
+        const tw = ctx.measureText(meters).width;
+        ctx.fillRect(-tw / 2 - 2, -6, tw + 4, 12);
+        ctx.fillStyle = rgba(label, 0.95);
+        ctx.fillText(meters, 0, 0);
+        ctx.restore();
+      }
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    sampleField(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  sampleField(0);
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

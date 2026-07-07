@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="打ち寄せる波">
+<meta name="pattern-desc" content="多層のサイン波が浜へ寄せて引き、波先に泡が立ち、引き波のあとに濡れた砂が残る。">
+<title>打ち寄せる波</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-secondary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: pointer; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">砂浜をクリックすると波がひと押し寄せる ─ 引き波は濡れ跡を残す</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const mix = (a, b, t) => [
+  Math.round(a[0] + (b[0] - a[0]) * t),
+  Math.round(a[1] + (b[1] - a[1]) * t),
+  Math.round(a[2] + (b[2] - a[2]) * t),
+];
+let last = performance.now(), tGlobal = 2.4, dirty = true;
+const C = {};
+const refreshColors = () => {
+  C.sand = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.hi   = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.sub  = hexRgb(token("--color-fg-secondary", "#6c655b"));
+  C.mut  = hexRgb(token("--color-fg-muted", "#a79f91"));
+  C.acc  = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accD = hexRgb(token("--color-accent-hover", "#46a89d"));
+  // 泡の色：暗い外観では明るい水色へ寄せて見えを保つ
+  const lum = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+  C.foam = lum(C.sand) < 0.45 ? mix(C.acc, [236, 246, 243], 0.68) : C.hi;
+  dirty = true;
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス / 汀線サンプリング ----
+const STEP = 4; // 汀線を 4px 毎の列でサンプリング
+let W = 0, H = 0, N = 0;
+let e1, e2, prevE2, wetReach, wetA, speckles = [];
+const resize = () => {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  N = Math.ceil(W / STEP) + 2;
+  e1 = new Float32Array(N); e2 = new Float32Array(N);
+  prevE2 = new Float32Array(N); wetReach = new Float32Array(N); wetA = new Float32Array(N);
+  computeEdges(tGlobal);
+  prevE2.set(e2); wetReach.set(e2);
+  // 砂の粒（静的な散らし模様）
+  speckles = [];
+  for (let i = 0; i < Math.round(W * H / 6500); i++) {
+    speckles.push([Math.random() * W, H * 0.3 + Math.random() * H * 0.7, 0.6 + Math.random() * 1.1]);
+  }
+  dirty = true;
+};
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; dirty = true; });
+
+// ---- 波モデル：うねり（寄せ引き）＋ 空間サイン波の重ね合わせ ＋ クリックのサージ ----
+const surges = []; // {x0, t0, A}
+const tide = (t) => Math.sin(t * 0.5) * 0.55 + Math.sin(t * 0.23 + 1.3) * 0.45; // -1..1 のゆったりした寄せ引き
+function surgeAt(x, t) {
+  let s = 0;
+  for (const g of surges) {
+    const a = t - g.t0;
+    if (a < 0 || a > 4.5) continue;
+    const fall = Math.exp(-((x - g.x0) * (x - g.x0)) / (2 * (W * 0.09) * (W * 0.09)));
+    s += g.A * fall * Math.sin(a * 3.2) * Math.exp(-a * 1.05);
+  }
+  return s;
+}
+function computeEdges(t) {
+  const base = H * 0.44;
+  const swell = tide(t) * H * 0.115;
+  for (let i = 0; i < N; i++) {
+    const x = i * STEP;
+    // 奥の層：深い水の帯（少し上で、ゆっくり）
+    e1[i] = base + swell * 0.75 - H * 0.055
+      + Math.sin(x * 0.006 + t * 0.9) * 14
+      + Math.sin(x * 0.015 - t * 0.55) * 8;
+    // 手前の層：波先（位相と速度を変えて重ねる）
+    e2[i] = base + swell + H * 0.02
+      + Math.sin(x * 0.008 - t * 1.15 + 1.1) * 15
+      + Math.sin(x * 0.021 + t * 0.8) * 8
+      + Math.sin(x * 0.0035 + t * 0.42) * 10
+      + surgeAt(x, t);
+  }
+}
+
+// ---- 泡パーティクル ----
+const foam = [];
+const rand = (a, b) => a + Math.random() * (b - a);
+function spawnFoam(x, y, carry) {
+  if (foam.length > 420) return;
+  foam.push({
+    x: x + rand(-3, 3), y: y + rand(-2, 2),
+    vx: rand(-9, 9), vy: carry * rand(0.4, 0.9),
+    r: rand(0.7, 2.4), life: rand(0.7, 1.7), max: 0,
+  });
+  foam[foam.length - 1].max = foam[foam.length - 1].life;
+}
+
+// ---- 入力 ----
+canvas.addEventListener("pointerdown", (e) => {
+  surges.push({ x0: e.clientX, t0: tGlobal, A: H * 0.07 });
+  if (surges.length > 12) surges.shift();
+  dirty = true;
+});
+
+// ---- ループ ----
+resize();
+window.addEventListener("resize", resize);
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  const surging = surges.some((g) => tGlobal - g.t0 < 4.5);
+  if (!reduced || surging) {           // reduce 時は操作起点のサージだけ動かす
+    tGlobal += dt;
+    dirty = true;
+  }
+  if (dirty) {
+    update(dt);
+    draw();
+    dirty = !reduced || surging || foam.length > 0;
+  }
+  requestAnimationFrame(frame);
+}
+
+function update(dt) {
+  computeEdges(tGlobal);
+  for (let i = 0; i < N; i++) {
+    const front = Math.max(e1[i], e2[i]);
+    // 濡れ跡：水が届いたところを記憶し、露出後ゆっくり乾く
+    if (front >= wetReach[i] - 0.5) { wetReach[i] = front; wetA[i] = 1; }
+    else {
+      wetA[i] = Math.max(0, wetA[i] - dt * 0.09);
+      if (wetA[i] === 0) wetReach[i] = front;
+    }
+    // 波先が前進しているとき泡を立てる
+    const adv = (e2[i] - prevE2[i]) / Math.max(dt, 1e-4);
+    if (adv > 26 && Math.random() < Math.min(0.5, adv * 0.004)) spawnFoam(i * STEP, e2[i] - 2, adv * 0.12);
+  }
+  prevE2.set(e2);
+  if (!reduced && Math.random() < 0.35) { // 波先の常在の泡
+    const i = (Math.random() * N) | 0;
+    spawnFoam(i * STEP, e2[i] - 1, 0);
+  }
+  for (let i = foam.length - 1; i >= 0; i--) {
+    const f = foam[i];
+    f.life -= dt;
+    f.x += f.vx * dt; f.y += f.vy * dt;
+    f.vx *= (1 - dt * 1.5); f.vy *= (1 - dt * 1.5);
+    if (f.life <= 0) foam.splice(i, 1);
+  }
+}
+
+function edgePath(edge) {
+  ctx.beginPath();
+  ctx.moveTo(0, -4);
+  ctx.lineTo(0, edge[0]);
+  for (let i = 1; i < N; i++) ctx.lineTo(i * STEP, edge[i]);
+  ctx.lineTo(W, -4);
+  ctx.closePath();
+}
+
+function draw() {
+  // 乾いた砂
+  ctx.fillStyle = rgba(C.sand, 1);
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = rgba(C.mut, 0.16);
+  for (const s of speckles) { ctx.beginPath(); ctx.arc(s[0], s[1], s[2], 0, Math.PI * 2); ctx.fill(); }
+
+  // 濡れた砂（列ごとの透明度で乾き具合を表す）
+  const wet = mix(C.sand, C.sub, 0.34);
+  for (let i = 0; i < N; i++) {
+    const top = Math.max(e1[i], e2[i]);
+    const h = wetReach[i] - top;
+    if (h > 0.5 && wetA[i] > 0.01) {
+      const x0 = Math.round(i * STEP - STEP / 2);
+      ctx.fillStyle = rgba(wet, wetA[i] * 0.42);
+      ctx.fillRect(x0, top - 1, STEP, h + 2);
+      // 波打ち際に近いほど濃く（薄い笠を重ねて縦の減衰をつくる）
+      ctx.fillStyle = rgba(wet, wetA[i] * 0.22);
+      ctx.fillRect(x0, top - 1, STEP, h * 0.45 + 2);
+    }
+  }
+
+  // 奥の水（深い帯）
+  edgePath(e1);
+  const g1 = ctx.createLinearGradient(0, 0, 0, H * 0.5);
+  g1.addColorStop(0, rgba(mix(C.accD, C.sub, 0.25), 0.95));
+  g1.addColorStop(1, rgba(C.accD, 0.85));
+  ctx.fillStyle = g1;
+  ctx.fill();
+
+  // 手前の水（浅く透けて砂が見える）
+  edgePath(e2);
+  ctx.fillStyle = rgba(C.acc, 0.42);
+  ctx.fill();
+
+  // 波先近くの明るみ（薄水色の帯）
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) { const x = i * STEP, y = e2[i] - 7; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.strokeStyle = rgba(mix(C.acc, C.foam, 0.55), 0.4);
+  ctx.lineWidth = 14; ctx.lineJoin = "round"; ctx.stroke();
+
+  // 泡のふち
+  ctx.beginPath();
+  for (let i = 0; i < N; i++) { const x = i * STEP, y = e2[i]; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.strokeStyle = rgba(C.foam, 0.92);
+  ctx.lineWidth = 2.6; ctx.stroke();
+
+  // 泡パーティクル
+  for (const f of foam) {
+    const a = Math.max(0, f.life / f.max);
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.r * (0.6 + 0.4 * a), 0, Math.PI * 2);
+    ctx.fillStyle = rgba(C.foam, a * 0.85);
+    ctx.fill();
+  }
+}
+
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

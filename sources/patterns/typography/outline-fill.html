@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>輪郭から塗りへ</title>
+<meta name="pattern-title" content="輪郭から塗りへ">
+<meta name="pattern-desc" content="スクロールにつれて巨大なアウトライン文字が下から塗り上がり、満ちた瞬間に小さな余韻がのぼる。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #stage {
+    position: fixed; inset: 0;
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  #word {
+    --p: 0;                       /* 塗り上がり 0..1 */
+    position: relative;
+    font-size: clamp(120px, 42vw, 460px);
+    font-weight: 900;
+    letter-spacing: .02em;
+    line-height: .9;
+    /* 輪郭 */
+    -webkit-text-stroke: clamp(1.4px, .5vw, 3px) var(--color-fg-muted);
+    color: transparent;
+    /* 下から accent が満ちるグラデーションをグリフ内にクリップ */
+    background-image: linear-gradient(
+      to top,
+      var(--color-accent-default) 0,
+      var(--color-accent-default) calc(var(--p) * 100%),
+      color-mix(in srgb, var(--color-accent-default) 55%, transparent) calc(var(--p) * 100% + .4px),
+      transparent calc(var(--p) * 100% + 3.5%));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    user-select: none;
+    transition: filter .6s ease;
+  }
+  #word.full { filter: drop-shadow(0 0 26px color-mix(in srgb, var(--color-accent-default) 60%, transparent)); }
+  /* 進捗レール */
+  #rail {
+    position: fixed; right: 22px; top: 50%; transform: translateY(-50%);
+    width: 4px; height: min(46vh, 360px); border-radius: 999px;
+    background: color-mix(in srgb, var(--color-border-default) 80%, transparent);
+    overflow: hidden;
+  }
+  #fill {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 0%;
+    background: var(--color-accent-default); border-radius: 999px;
+  }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+    transition: opacity .5s ease;
+  }
+  .spark {
+    position: fixed; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--color-accent-default);
+    pointer-events: none; will-change: transform, opacity;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="word">満ちる</div>
+</div>
+<div id="rail"><div id="fill"></div></div>
+<div id="hint">スクロール / ドラッグで文字を満たす</div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const word = document.getElementById("word");
+  const fill = document.getElementById("fill");
+  const hint = document.getElementById("hint");
+
+  let target = 0;   // 入力による目標進捗
+  let p = 0;        // 表示進捗（滑らかに追従）
+  let wasFull = false;
+
+  function addTarget(delta) {
+    target = Math.min(1, Math.max(0, target + delta));
+    hint.style.opacity = target > 0.02 ? "0" : "1";
+  }
+
+  // ホイール＝仮想スクロール（ページはスクロールさせない）
+  window.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    addTarget(e.deltaY / 1400);
+  }, { passive: false });
+
+  // ドラッグ（マウス／タッチ共通）
+  let dragging = false, lastY = 0;
+  window.addEventListener("pointerdown", (e) => { dragging = true; lastY = e.clientY; });
+  window.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    addTarget((lastY - e.clientY) / 520);
+    lastY = e.clientY;
+  });
+  window.addEventListener("pointerup", () => { dragging = false; });
+  window.addEventListener("pointercancel", () => { dragging = false; });
+
+  function celebrate() {
+    if (reduce.matches) return;
+    const rect = word.getBoundingClientRect();
+    const n = 14;
+    for (let i = 0; i < n; i++) {
+      const s = document.createElement("div");
+      s.className = "spark";
+      const sx = rect.left + rect.width * (0.2 + Math.random() * 0.6);
+      const sy = rect.top + rect.height * (0.15 + Math.random() * 0.4);
+      s.style.left = sx + "px"; s.style.top = sy + "px";
+      const sz = 4 + Math.random() * 6;
+      s.style.width = s.style.height = sz + "px";
+      s.style.opacity = "0.9";
+      document.body.appendChild(s);
+      const rise = 60 + Math.random() * 120;
+      const drift = (Math.random() - 0.5) * 80;
+      const dur = 900 + Math.random() * 900;
+      s.animate([
+        { transform: "translate(0,0) scale(1)", opacity: 0.9 },
+        { transform: `translate(${drift}px, ${-rise}px) scale(0.2)`, opacity: 0 },
+      ], { duration: dur, easing: "cubic-bezier(.22,.61,.36,1)" }).onfinish = () => s.remove();
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    // バネ的にターゲットへ追従
+    p += (target - p) * (1 - Math.exp(-8 * dt));
+    if (Math.abs(target - p) < 0.0004) p = target;
+    word.style.setProperty("--p", p.toFixed(4));
+    fill.style.height = (p * 100).toFixed(2) + "%";
+
+    const full = p > 0.985;
+    word.classList.toggle("full", full);
+    if (full && !wasFull) { wasFull = true; celebrate(); }
+    if (!full) wasFull = false;
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

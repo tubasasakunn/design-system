@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="育つ木">
+<meta name="pattern-desc" content="L-system で生成した枝分かれの木がタートル解釈で少しずつ育ち、枝先に葉と花が開く。育て直すたびに違う木になる。">
+<title>育つ木</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 320px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+  .caption button {
+    margin-top: 12px; padding: .5rem 1rem; border-radius: 999px; cursor: pointer;
+    font: inherit; font-size: .78rem; color: var(--color-accent-fg);
+    background: var(--color-accent-default); border: none;
+    transition: background .2s;
+  }
+  .caption button:hover { background: var(--color-accent-hover); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>育つ木</h1>
+  <p>L-system の規則から枝が伸び、枝先に葉と花が開きます。</p>
+  <button id="grow" type="button">もう一度育てる</button>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const BLOOMS = ["#f0a8bd", "#f1d189", "#bcb2e8", "#f3a890", "#a9dcc0"].map(hex);
+
+  let bg, bark, leafC;
+  function readColors() {
+    bg = hex(token("--color-bg-primary", "#faf7f1"));
+    bark = hex(token("--color-fg-secondary", "#6c655b"));
+    leafC = hex(token("--color-accent-default", "#5bbcb1"));
+  }
+
+  let W = 0, H = 0, dpr = 1;
+  function resize() {
+    dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (segs.length) build(); // 画面サイズ変化で木を作り直す
+  }
+
+  // ---- L-system の展開（確率規則）----
+  function expand(seed) {
+    // X: 成長点, F: 前進. 規則は複数候補から確率で選ぶ
+    const rules = {
+      X: [
+        "F[+X][-X]FX",
+        "F[+X]F[-X]X",
+        "F[-X][+X]F[+X]",
+        "F[+X][-X][/X]",
+      ],
+      F: ["FF", "F"],
+    };
+    let s = "X";
+    const iters = 5;
+    for (let it = 0; it < iters; it++) {
+      let out = "";
+      for (const ch of s) {
+        const r = rules[ch];
+        if (r) out += r[(seed() * r.length) | 0];
+        else out += ch;
+      }
+      s = out;
+    }
+    return s;
+  }
+
+  // 決定論的な乱数（育て直しで種を変える）
+  let rngState = 1;
+  function rng() {
+    rngState = (rngState * 1664525 + 1013904223) >>> 0;
+    return rngState / 4294967296;
+  }
+  function reseed() { rngState = (Math.random() * 4294967296) >>> 0; }
+
+  // ---- タートル解釈で枝セグメントと葉/花を生成 ----
+  let segs = [];   // {x1,y1,x2,y2,w,order}
+  let deco = [];   // {x,y,type,ang,color,order,size}
+  let totalOrder = 0;
+  let params = {};
+
+  function build() {
+    const localRng = (() => { let st = rngState; return () => { st = (st * 1664525 + 1013904223) >>> 0; return st / 4294967296; }; })();
+    const str = expand(localRng);
+    params = {
+      angle: (18 + rng() * 16) * Math.PI / 180,   // 分岐角
+      len: (7 + rng() * 5),                        // 基本枝長
+      shrink: 0.86 + rng() * 0.06,                 // 世代ごとの短縮
+      flowerRate: 0.35 + rng() * 0.4,
+    };
+    const jitter = params.angle * 0.35;
+    segs = []; deco = [];
+    const stack = [];
+    let x = W * 0.5, y = H - Math.max(60, H * 0.08);
+    let ang = -Math.PI / 2;   // 上向き
+    let len = params.len;
+    let width = Math.max(6, Math.min(W, H) * 0.014);
+    let order = 0;
+    // 画面に収まるようスケールを見積もる: まず範囲を計測してから再配置
+    let minX = x, maxX = x, minY = y, maxY = y;
+    const raw = [];
+    let sx = 0, sy = 0, sa = -Math.PI / 2, slen = 1, sstack = [];
+    for (const ch of str) {
+      if (ch === "F") {
+        const nx = sx + Math.cos(sa) * slen, ny = sy + Math.sin(sa) * slen;
+        raw.push([sx, sy, nx, ny]); sx = nx; sy = ny;
+        minX = Math.min(minX, nx); maxX = Math.max(maxX, nx);
+        minY = Math.min(minY, ny); maxY = Math.max(maxY, ny);
+      } else if (ch === "+") sa += 0.4;
+      else if (ch === "-") sa -= 0.4;
+      else if (ch === "/") sa += 0.2;
+      else if (ch === "[") sstack.push([sx, sy, sa, slen]);
+      else if (ch === "]") { const p = sstack.pop(); if (p) [sx, sy, sa, slen] = p; }
+    }
+    const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
+    const scale = Math.min((W * 0.7) / spanX, (H * 0.72) / spanY);
+    len = scale;
+
+    // 本番の解釈（スケール適用・幅と葉/花つき）
+    x = W * 0.5; y = H - Math.max(50, H * 0.08);
+    ang = -Math.PI / 2; width = Math.max(5, Math.min(W, H) * 0.013);
+    for (const ch of str) {
+      if (ch === "F") {
+        const nx = x + Math.cos(ang) * len, ny = y + Math.sin(ang) * len;
+        segs.push({ x1: x, y1: y, x2: nx, y2: ny, w: width, order: order++ });
+        x = nx; y = ny;
+        width = Math.max(1.1, width * 0.985);
+      } else if (ch === "+") ang += params.angle + (rng() - 0.5) * jitter;
+      else if (ch === "-") ang -= params.angle + (rng() - 0.5) * jitter;
+      else if (ch === "/") ang += params.angle * 0.5 * (rng() - 0.5);
+      else if (ch === "[") stack.push([x, y, ang, width]);
+      else if (ch === "]") {
+        // 枝の終端 = 葉か花をつける
+        const isFlower = rng() < params.flowerRate;
+        deco.push({
+          x, y, type: isFlower ? "flower" : "leaf",
+          ang: ang + (rng() - 0.5) * 0.6,
+          color: isFlower ? BLOOMS[(rng() * BLOOMS.length) | 0] : null,
+          order: order, size: (isFlower ? 5 + rng() * 4 : 4 + rng() * 3),
+        });
+        const p = stack.pop(); if (p) [x, y, ang, width] = p;
+      }
+    }
+    totalOrder = order;
+    growth = rm.matches ? totalOrder : 0;
+  }
+
+  let growth = 0; // 現在描画済みの order 数（少しずつ増える）
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = rgba(bg, 1);
+    ctx.fillRect(0, 0, W, H);
+    const g = growth;
+
+    // 枝
+    for (const s of segs) {
+      if (s.order > g) break;
+      let ex = s.x2, ey = s.y2;
+      if (s.order + 1 > g) {
+        // 先頭セグメントを部分的に伸ばす
+        const f = g - s.order;
+        ex = s.x1 + (s.x2 - s.x1) * f;
+        ey = s.y1 + (s.y2 - s.y1) * f;
+      }
+      ctx.beginPath();
+      ctx.moveTo(s.x1, s.y1);
+      ctx.lineTo(ex, ey);
+      ctx.lineWidth = s.w;
+      const shade = mix(bark, leafC, Math.min(1, s.order / totalOrder * 0.7));
+      ctx.strokeStyle = rgba(shade, 0.92);
+      ctx.stroke();
+    }
+
+    // 葉・花（枝が届いてから開く）
+    for (const d of deco) {
+      const open = Math.min(1, Math.max(0, (g - d.order) / 18));
+      if (open <= 0) continue;
+      const e = 1 - Math.pow(1 - open, 3); // easeOutCubic
+      if (d.type === "leaf") drawLeaf(d, e);
+      else drawFlower(d, e);
+    }
+  }
+
+  function drawLeaf(d, e) {
+    const s = d.size * e;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(d.ang);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(s * 0.9, -s * 0.7, s * 2.2, 0);
+    ctx.quadraticCurveTo(s * 0.9, s * 0.7, 0, 0);
+    ctx.fillStyle = rgba(mix(leafC, [255, 255, 255], 0.15), 0.9);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawFlower(d, e) {
+    const s = d.size * e;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    const petals = 5;
+    for (let i = 0; i < petals; i++) {
+      const a = (i / petals) * Math.PI * 2 + d.ang;
+      ctx.beginPath();
+      const px = Math.cos(a) * s, py = Math.sin(a) * s;
+      ctx.ellipse(px, py, s * 0.9, s * 0.55, a, 0, Math.PI * 2);
+      ctx.fillStyle = rgba(mix(d.color, [255, 255, 255], 0.28), 0.92);
+      ctx.fill();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(mix(d.color, [120, 90, 40], 0.35), 0.95);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    if (!rm.matches && growth < totalOrder) {
+      growth = Math.min(totalOrder, growth + totalOrder * dt * 0.4);
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  function regrow() { reseed(); build(); }
+  document.getElementById("grow").addEventListener("click", regrow);
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  reseed();
+  build();
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

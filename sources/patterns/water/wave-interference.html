@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="波の干渉縞">
+<meta name="pattern-desc" content="複数の波源から広がる同心円波が重なり合い、干渉縞を描く。波源はドラッグで動かせる。">
+<title>波の干渉縞</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #stage.dragging { cursor: grabbing; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">波源をドラッグして干渉縞を変える ─ 空いた場所をクリックで波源を追加</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const off = document.createElement("canvas");
+const octx = off.getContext("2d");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const mix = (a, b, t) => [
+  a[0] + (b[0] - a[0]) * t,
+  a[1] + (b[1] - a[1]) * t,
+  a[2] + (b[2] - a[2]) * t,
+];
+
+// 谷は深い青緑、中間は生成り、山は光 ─ の 3 段グラデーション LUT
+const LUT = new Uint8ClampedArray(256 * 3);
+const C = {};
+const refreshColors = () => {
+  C.hi   = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.deep = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.acc  = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accD = hexRgb(token("--color-accent-hover", "#46a89d"));
+  const lo  = mix(C.deep, C.accD, 0.62);
+  const mid = mix(C.deep, C.acc, 0.14);
+  const hiC = mix(C.hi, C.acc, 0.16);
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255;
+    const c = v < 0.5 ? mix(lo, mid, v * 2) : mix(mid, hiC, (v - 0.5) * 2);
+    LUT[i * 3] = c[0]; LUT[i * 3 + 1] = c[1]; LUT[i * 3 + 2] = c[2];
+  }
+  needsRender = true;
+};
+
+// ---- 波源 ----
+const sources = [
+  { x: 0.34, y: 0.42 },
+  { x: 0.66, y: 0.5 },
+  { x: 0.48, y: 0.72 },
+];
+
+// ---- キャンバス / 低解像度フィールド ----
+let W = 0, H = 0, simW = 0, simH = 0, img = null;
+const resize = () => {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  simW = Math.min(240, Math.max(120, Math.round(W / 5.5)));
+  simH = Math.max(80, Math.round(simW * H / W));
+  off.width = simW; off.height = simH;
+  img = octx.createImageData(simW, simH);
+  needsRender = true;
+};
+let needsRender = true;
+window.addEventListener("resize", resize);
+resize();
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; needsRender = true; });
+
+// ---- 干渉場：sum_i sin(k·r_i − ωt) / (1 + a·r_i) を画素毎に評価 ----
+const K = (Math.PI * 2) / 23;   // 波数（sim px 基準の波長 23px）
+const OMEGA = 4.2;              // 角振動数
+function renderField(t) {
+  const n = sources.length;
+  const sx = new Float64Array(n), sy = new Float64Array(n);
+  for (let i = 0; i < n; i++) { sx[i] = sources[i].x * simW; sy[i] = sources[i].y * simH; }
+  const d = img.data;
+  const wt = OMEGA * t;
+  let p = 0;
+  for (let y = 0; y < simH; y++) {
+    for (let x = 0; x < simW; x++, p += 4) {
+      let s = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x - sx[i], dy = y - sy[i];
+        const r = Math.sqrt(dx * dx + dy * dy);
+        s += Math.sin(r * K - wt) / (1 + r * 0.012);
+      }
+      // ソフトな正規化（tanh で山谷を押し込み、縞のコントラストを保つ）
+      let v = Math.tanh(s * 0.9) * 0.5 + 0.5;
+      const q = ((v * 255) | 0) * 3;
+      d[p] = LUT[q]; d[p + 1] = LUT[q + 1]; d[p + 2] = LUT[q + 2]; d[p + 3] = 255;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+}
+
+// ---- 入力：波源のドラッグ / クリック追加 / ダブルクリック削除 ----
+let drag = null, downAt = null, moved = 0;
+const hit = (px, py) => {
+  let best = null, bd = 30;
+  for (const s of sources) {
+    const d = Math.hypot(px - s.x * W, py - s.y * H);
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+};
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture?.(e.pointerId);
+  drag = hit(e.clientX, e.clientY);
+  downAt = { x: e.clientX, y: e.clientY };
+  moved = 0;
+  if (drag) canvas.classList.add("dragging");
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!downAt) return;
+  moved += Math.abs(e.movementX || 0) + Math.abs(e.movementY || 0);
+  if (drag) {
+    drag.x = Math.min(0.97, Math.max(0.03, e.clientX / W));
+    drag.y = Math.min(0.97, Math.max(0.03, e.clientY / H));
+    needsRender = true;
+  }
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (downAt && !drag && moved < 8 && sources.length < 6) {
+    sources.push({ x: e.clientX / W, y: e.clientY / H });
+    needsRender = true;
+  }
+  drag = null; downAt = null;
+  canvas.classList.remove("dragging");
+});
+canvas.addEventListener("pointercancel", () => { drag = null; downAt = null; canvas.classList.remove("dragging"); });
+canvas.addEventListener("dblclick", (e) => {
+  const s = hit(e.clientX, e.clientY);
+  if (s && sources.length > 2) { sources.splice(sources.indexOf(s), 1); needsRender = true; }
+});
+
+// ---- ループ ----
+let last = performance.now(), t = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (!reduced) { t += dt; needsRender = true; }  // reduce 時は位相を凍結し、操作時のみ再描画
+  if (needsRender) { renderField(t); needsRender = false; }
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(off, 0, 0, W, H);
+
+  // 波源ハンドル
+  for (const s of sources) {
+    const x = s.x * W, y = s.y * H;
+    const active = s === drag;
+    ctx.beginPath(); ctx.arc(x, y, active ? 13 : 9, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(C.hi, 0.92); ctx.fill();
+    ctx.strokeStyle = rgba(C.accD, 0.95); ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, active ? 4.5 : 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(C.accD, 0.95); ctx.fill();
+    if (active) {
+      ctx.beginPath(); ctx.arc(x, y, 22, 0, Math.PI * 2);
+      ctx.strokeStyle = rgba(C.hi, 0.55); ctx.lineWidth = 1.5; ctx.stroke();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

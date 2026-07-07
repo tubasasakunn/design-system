@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="蝋燭の炎">
+<meta name="pattern-desc" content="ノイズで輪郭がゆらぐ炎と明滅する光暈。ホールドで息を吹きかけると大きく揺れ、長く続けると消える。もう一度触れて再点火。">
+<title>蝋燭の炎</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: pointer; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 74%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint" id="hint">押し続けて息を吹きかける ─ 長いと消える</div>
+<script>
+(() => {
+"use strict";
+const canvas=document.getElementById("stage");
+const ctx=canvas.getContext("2d");
+const hintEl=document.getElementById("hint");
+
+const token=(n,fb)=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||fb;
+const hexRgb=(h)=>{h=h.replace("#","");if(h.length===3)h=h.replace(/./g,c=>c+c);const n=parseInt(h.slice(0,6),16);return [(n>>16)&255,(n>>8)&255,n&255];};
+const mix=(a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
+const rgb=(c)=>`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const rgba=(c,a)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const C={};
+const refreshColors=()=>{
+  C.bg=hexRgb(token("--color-bg-primary","#faf7f1"));
+  C.bg2=hexRgb(token("--color-bg-secondary","#f1ece2"));
+  C.elev=hexRgb(token("--color-bg-elevated","#fffdf9"));
+  C.ink=hexRgb(token("--color-fg-primary","#2c2a26"));
+  C.mut=hexRgb(token("--color-fg-muted","#a79f91"));
+  C.warm=hexRgb(token("--color-status-warning","#f0a830"));
+  C.acc=hexRgb(token("--color-accent-default","#5bbcb1"));
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme","data-appearance"]});
+
+let W=0,H=0;
+const resize=()=>{const dpr=Math.min(2,window.devicePixelRatio||1);W=window.innerWidth;H=window.innerHeight;canvas.width=Math.round(W*dpr);canvas.height=Math.round(H*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);};
+window.addEventListener("resize",resize);resize();
+
+const rmq=window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced=rmq.matches; rmq.addEventListener?.("change",e=>{reduced=e.matches;});
+
+// ---- ノイズ（層状サイン）----
+function nz(u,t,seed){
+  return Math.sin(u*2.1+t*6.1+seed)*0.5
+       + Math.sin(u*4.7-t*9.3+seed*1.7)*0.3
+       + Math.sin(u*9.3+t*15.0+seed*2.3)*0.2;
+}
+
+// ---- 状態 ----
+let life=1;            // 炎の生命 0..1
+let wind=0;            // 息の強さ（右向き）
+let holding=false, holdT=0, downT=0;
+let flicker=0;         // 明滅
+const smoke=[];        // 消えた後の煙
+let flash=0;           // 再点火のフラッシュ
+
+function baseGeom(){ return { cx:W*0.5, baseY:H*0.62, Hf:Math.min(H*0.30, 220), maxW:Math.min(W*0.05,46) }; }
+
+// ---- 炎の輪郭を作る ----
+function flameOutline(scale, t, gm, swayAmp, noiseAmp){
+  const N=44, pts=[];
+  const Hf=gm.Hf*life*scale;
+  for(let i=0;i<=N;i++){
+    const v=i/N;
+    const prof=Math.pow(Math.sin(Math.PI*Math.pow(v,0.82)),0.7); // 涙形
+    const w=gm.maxW*scale*prof*(1-v*0.1);
+    const sway=(wind*0.9)*(v*v)*gm.Hf*0.9 + nz(v*3.0,t,1.3)*noiseAmp*v;
+    const jitter=nz(v*5.0,t*1.3,4.1)*noiseAmp*0.6*prof;
+    const xc=gm.cx+sway;
+    const y=gm.baseY - v*Hf - Math.max(0,wind)*v*8; // 風で少し伸びる
+    pts.push([xc - w + jitter, y, xc + w + jitter]);
+  }
+  return pts;
+}
+function fillFlame(pts,col){
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0],pts[0][1]);
+  for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);   // 右側を上へ
+  for(let i=pts.length-1;i>=0;i--) ctx.lineTo(pts[i][2],pts[i][1]); // 左側を下へ
+  ctx.closePath(); ctx.fillStyle=col; ctx.fill();
+}
+
+let prev=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-prev)/1000); prev=now;
+  const t=now/1000;
+  const gm=baseGeom();
+
+  // 息・生命の更新
+  if(holding && life>0){ holdT+=dt; wind += (Math.min(1.4,0.5+holdT*0.7)-wind)*Math.min(1,dt*4);
+    if(holdT>1.6) life=Math.max(0,life-dt*1.4); }        // 長押しで消える
+  else { wind += (0-wind)*Math.min(1,dt*3); }
+  if(life<=0 && smoke.length===0 && !holding){ /* 消えた */ }
+
+  // 明滅
+  const fl=reduced?0.15:1;
+  flicker += ((0.5+0.5*(nz(0.7,t,9)*0.5+0.5))*fl - flicker)*Math.min(1,dt*8);
+  if(flash>0) flash=Math.max(0,flash-dt*2.5);
+
+  // 背景（炎の光暈で温まる）
+  const warmth = life*(0.5+flicker*0.5);
+  const bgTop=mix(C.bg, mix(C.bg,C.ink,0.5), 0.25*(1-warmth*0.3));
+  const g=ctx.createRadialGradient(gm.cx,gm.baseY-gm.Hf*0.4,20,gm.cx,gm.baseY-gm.Hf*0.4,Math.max(W,H)*0.7);
+  g.addColorStop(0, rgb(mix(C.bg, C.warm, 0.10*warmth)));
+  g.addColorStop(0.5, rgb(mix(C.bg, C.bg2, 0.5)));
+  g.addColorStop(1, rgb(bgTop));
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  // 光暈（明滅する加算グロー）
+  if(life>0){
+    ctx.save(); ctx.globalCompositeOperation="lighter";
+    const hx=gm.cx+wind*40, hy=gm.baseY-gm.Hf*life*0.55;
+    const hr=(gm.Hf*0.9+40)*life*(0.85+flicker*0.3);
+    const halo=ctx.createRadialGradient(hx,hy,0,hx,hy,hr);
+    const hc=mix(C.warm,[255,244,214],0.5);
+    halo.addColorStop(0, rgba(hc,0.42*life)); halo.addColorStop(0.4, rgba(hc,0.16*life)); halo.addColorStop(1, rgba(hc,0));
+    ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(hx,hy,hr,0,6.283); ctx.fill();
+    ctx.restore();
+  }
+
+  // 蝋燭本体
+  const cw=Math.min(W*0.11,90), ch=H*0.26;
+  const bx=gm.cx-cw/2, byTop=gm.baseY+4;
+  const bodyG=ctx.createLinearGradient(bx,0,bx+cw,0);
+  bodyG.addColorStop(0, rgb(mix(C.elev,C.ink,0.16)));
+  bodyG.addColorStop(0.5, rgb(C.elev));
+  bodyG.addColorStop(1, rgb(mix(C.elev,C.ink,0.22)));
+  ctx.fillStyle=bodyG;
+  roundRect(bx,byTop,cw,ch,10); ctx.fill();
+  // 蝋の窪みと縁
+  ctx.fillStyle=rgba(mix(C.warm,C.ink,0.1),0.18*(0.4+warmth));
+  ctx.beginPath(); ctx.ellipse(gm.cx,byTop+4,cw*0.42,7,0,0,6.283); ctx.fill();
+  ctx.strokeStyle=rgba(C.mut,0.4); ctx.lineWidth=1; roundRect(bx,byTop,cw,ch,10); ctx.stroke();
+  // 芯
+  ctx.strokeStyle=rgb(mix(C.ink,C.warm,life*0.3)); ctx.lineWidth=2.4; ctx.lineCap="round";
+  ctx.beginPath(); ctx.moveTo(gm.cx,byTop+2); ctx.lineTo(gm.cx+wind*6,byTop-10-life*4); ctx.stroke();
+
+  // ---- 炎 ----
+  if(life>0.01){
+    ctx.save(); ctx.globalCompositeOperation="lighter";
+    const noiseAmp=(reduced?4:12)*(0.6+flicker*0.8)*(0.8+wind*0.5);
+    // 外炎（オレンジ）
+    fillFlame(flameOutline(1.0,t,gm,1,noiseAmp), rgba(mix(C.warm,[240,120,60],0.35), 0.5*life));
+    // 中炎（黄）
+    fillFlame(flameOutline(0.7,t,gm,0.8,noiseAmp*0.8), rgba(mix([255,214,120],C.warm,0.2), 0.65*life));
+    // 芯（白熱）
+    fillFlame(flameOutline(0.42,t,gm,0.6,noiseAmp*0.6), rgba([255,250,232], 0.9*life));
+    // 根本の青み
+    ctx.globalCompositeOperation="source-over";
+    const base=flameOutline(0.55,t,gm,0.5,noiseAmp*0.5).slice(0,10);
+    ctx.beginPath(); ctx.moveTo(base[0][0],base[0][1]);
+    for(let i=1;i<base.length;i++) ctx.lineTo(base[i][0],base[i][1]);
+    for(let i=base.length-1;i>=0;i--) ctx.lineTo(base[i][2],base[i][1]);
+    ctx.closePath(); ctx.fillStyle=rgba(mix(C.acc,[120,150,220],0.5),0.30*life); ctx.fill();
+    if(flash>0){
+      ctx.globalCompositeOperation="lighter";
+      const fx=gm.cx,fy=gm.baseY-gm.Hf*life*0.4;
+      const fg=ctx.createRadialGradient(fx,fy,0,fx,fy,90*flash);
+      fg.addColorStop(0,rgba([255,255,240],0.6*flash)); fg.addColorStop(1,rgba([255,255,240],0));
+      ctx.fillStyle=fg; ctx.beginPath(); ctx.arc(fx,fy,90*flash,0,6.283); ctx.fill();
+    }
+    ctx.restore();
+  } else if(life>0){ }
+
+  // 消えた瞬間に煙を放つ
+  if(life<=0 && wasLit){
+    wasLit=false;
+    for(let i=0;i<14;i++) smoke.push({x:gm.cx+(Math.random()-0.5)*6,y:gm.baseY-8,vx:(Math.random()-0.5)*8,vy:-20-Math.random()*20,life:1,r:6+Math.random()*8,ph:Math.random()*6.28});
+  }
+  if(life>0) wasLit=true;
+
+  // 煙
+  for(let i=smoke.length-1;i>=0;i--){
+    const s=smoke[i];
+    s.life-=dt*0.4; if(s.life<=0){smoke.splice(i,1);continue;}
+    s.vy+= -6*dt; s.vx += Math.sin(t*2+s.ph)*10*dt;
+    s.x+=s.vx*dt; s.y+=s.vy*dt; s.r+=8*dt;
+    ctx.fillStyle=rgba(mix(C.mut,C.ink,0.2), 0.10*s.life);
+    ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,6.283); ctx.fill();
+  }
+
+  hintEl.textContent = life<=0 ? "触れて再点火" : (holding? "ふーっ…" : "押し続けて息を吹きかける ─ 長いと消える");
+  requestAnimationFrame(frame);
+}
+let wasLit=true;
+
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+requestAnimationFrame(frame);
+
+// ---- 入力 ----
+canvas.addEventListener("pointerdown",(e)=>{
+  canvas.setPointerCapture?.(e.pointerId);
+  downT=performance.now();
+  if(life<=0){ life=1; wasLit=true; flash=1; holdT=0; return; } // 再点火
+  holding=true; holdT=0;
+});
+const up=()=>{ holding=false; };
+canvas.addEventListener("pointerup",up);
+canvas.addEventListener("pointercancel",up);
+})();
+</script>
+</body>
+</html>

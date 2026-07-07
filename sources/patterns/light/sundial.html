@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="影の時計">
+<meta name="pattern-desc" content="光源が空の弧を巡り、立てた棒や図形の影が光の角度から計算されて伸縮・回転する日時計。時間スライダーで朝から夕へ。">
+<title>影の時計</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: pointer; }
+  .hint {
+    position: fixed; bottom: 74px; left: 50%; transform: translateX(-50%);
+    padding: .5rem 1.1rem; border-radius: 999px; font-size: .76rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 74%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">下のスライダー、または画面をドラッグして時刻を動かす</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h = h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c); const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const mix = (a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
+const rgb = (c)=>`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const rgba = (c,a)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const C = {};
+const refreshColors = () => {
+  C.bg   = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.bg2  = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.elev = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.ink  = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.mut  = hexRgb(token("--color-fg-muted", "#a79f91"));
+  C.acc  = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.warm = hexRgb(token("--color-status-warning", "#f0a830"));
+  C.bord = hexRgb(token("--color-border-default", "#ece6db"));
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, { attributes:true, attributeFilter:["data-theme","data-appearance"] });
+
+let W=0,H=0;
+const resize = () => { const dpr=Math.min(2,window.devicePixelRatio||1); W=window.innerWidth; H=window.innerHeight; canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); };
+window.addEventListener("resize", resize); resize();
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches; rmq.addEventListener?.("change",(e)=>{reduced=e.matches;});
+
+// ---- 時刻 t : 0=朝(東) 0.5=正午(頭上) 1=夕(西) ----
+let t = 0.3, target = 0.3, dragging = false, autoDir = 1;
+
+// ---- 立てるオブジェクト（地面上の位置 gx[-1..1], depth[0..1], シルエット） ----
+// シルエットは局所座標 u(横 -w..w), v(高さ 0..h) の外周点列で表す。
+function rectSil(w,h){ return [[-w,0],[-w,h],[w,h],[w,0]]; }
+function triSil(w,h){ return [[-w,0],[0,h],[w,0]]; }
+function archSil(w,h){ const p=[[-w,0],[-w,h*0.6]]; const seg=10; for(let i=0;i<=seg;i++){const a=Math.PI*(1-i/seg); p.push([Math.cos(a)*w, h*0.6+Math.sin(a)*(h*0.4)]);} p.push([w,0]); return p; }
+function diamondSil(w,h){ return [[0,h*0.15],[-w,h*0.55],[0,h*0.95],[w,0.55*h]]; }
+
+const objects = [
+  { gx:-0.62, depth:0.30, sil: archSil(20, 78),  tint:0.0 },
+  { gx:-0.30, depth:0.60, sil: rectSil(13, 128), tint:0.12 },
+  { gx: 0.30, depth:0.55, sil: triSil(30, 150),  tint:0.0, gnomon:true },
+  { gx: 0.62, depth:0.32, sil: diamondSil(22,96), tint:0.18 },
+  { gx: 0.05, depth:0.18, sil: rectSil(8, 58),   tint:0.0 },
+];
+
+let prev = performance.now();
+function frame(now){
+  const dt = Math.min(0.05,(now-prev)/1000); prev=now;
+  if (!dragging && !reduced){ target += autoDir*dt*0.03; if(target>1){target=1;autoDir=-1;} if(target<0){target=0;autoDir=1;} }
+  t += (target-t)*Math.min(1,dt*5);
+
+  // ---- 太陽の位置と角度 ----
+  const sunAng = Math.PI*(1 - t);           // π(左/朝) → 0(右/夕)
+  const alt = Math.sin(sunAng);             // 0..1..0 高度
+  const elev = 0.05 + alt*1.42;             // 仰角(rad)
+  const tanE = Math.max(0.06, Math.tan(Math.min(elev, 1.52)));
+  const lowSun = 1 - alt;                   // 朝夕ほど大きい
+
+  const horizonY = H*0.46;
+  const groundY = (depth)=> horizonY + depth*(H-horizonY-92);
+  const scaleOf = (depth)=> 0.55 + depth*0.6;
+
+  // ---- 空 ----
+  const dayCool = mix(C.bg, mix(C.acc, C.bg, 0.72), alt*0.5);
+  const morn = mix(C.warm, C.bg2, 0.35);
+  const skyTop = mix(dayCool, morn, lowSun*0.7);
+  const skyHor = mix(C.bg2, C.warm, lowSun*0.55);
+  const sg = ctx.createLinearGradient(0,0,0,horizonY);
+  sg.addColorStop(0, rgb(skyTop)); sg.addColorStop(1, rgb(skyHor));
+  ctx.fillStyle=sg; ctx.fillRect(0,0,W,horizonY);
+
+  // ---- 地面 ----
+  const gg = ctx.createLinearGradient(0,horizonY,0,H);
+  gg.addColorStop(0, rgb(mix(C.bg2, C.warm, lowSun*0.28)));
+  gg.addColorStop(1, rgb(mix(C.bg, C.ink, 0.06)));
+  ctx.fillStyle=gg; ctx.fillRect(0,horizonY,W,H-horizonY);
+  // 地平線
+  ctx.strokeStyle=rgba(C.bord,0.8); ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,horizonY+0.5); ctx.lineTo(W,horizonY+0.5); ctx.stroke();
+
+  // ---- 太陽 ----
+  const arcR = Math.min(W,H)*0.42;
+  const cx = W*0.5;
+  const sx = cx + Math.cos(sunAng)*arcR;
+  const sy = horizonY - Math.sin(sunAng)*arcR;
+  const sunR = Math.min(W,H)*0.045;
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const halo = ctx.createRadialGradient(sx,sy,sunR*0.4,sx,sy,sunR*5);
+  const hc = mix([255,246,224], C.warm, lowSun*0.6);
+  halo.addColorStop(0, rgba(hc,0.5)); halo.addColorStop(0.4, rgba(hc,0.18)); halo.addColorStop(1, rgba(hc,0));
+  ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(sx,sy,sunR*5,0,6.283); ctx.fill();
+  ctx.restore();
+  const sd = ctx.createRadialGradient(sx-sunR*0.2,sy-sunR*0.2,sunR*0.1,sx,sy,sunR);
+  sd.addColorStop(0,"rgb(255,253,246)"); sd.addColorStop(1, rgb(mix([255,240,210],C.warm,0.5)));
+  ctx.fillStyle=sd; ctx.beginPath(); ctx.arc(sx,sy,sunR,0,6.283); ctx.fill();
+
+  // ---- 影の方向（画面座標） ----
+  // 太陽と反対の水平方向 + 手前へ倒れる地面バイアス
+  const awayX = -Math.cos(sunAng);          // 朝: +（右へ） 夕: -（左へ）
+  const dirLen = Math.hypot(awayX, 0.42);
+  const dirX = awayX/dirLen, dirY = 0.42/dirLen;
+
+  // ---- 影を先に全部（地面に落ちる） ----
+  for (const o of objects){
+    const s = scaleOf(o.depth);
+    const bx = cx + o.gx*W*0.5*0.92;
+    const by = groundY(o.depth);
+    ctx.beginPath();
+    for (let i=0;i<o.sil.length;i++){
+      const [u,v] = o.sil[i];
+      const L = (v*s)/tanE;                  // 高さに比例した影長
+      const px = bx + u*s + dirX*L;
+      const py = by + dirY*L;
+      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.closePath();
+    const shadeA = 0.16 + alt*0.22;          // 高い日ほど濃く締まる
+    ctx.fillStyle = rgba(mix(C.ink, C.bg2, 0.15), shadeA);
+    ctx.fill();
+  }
+
+  // ---- オブジェクト本体（立っている） ----
+  for (const o of objects){
+    const s = scaleOf(o.depth);
+    const bx = cx + o.gx*W*0.5*0.92;
+    const by = groundY(o.depth);
+    ctx.beginPath();
+    for (let i=0;i<o.sil.length;i++){
+      const [u,v] = o.sil[i];
+      const px = bx + u*s, py = by - v*s;
+      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.closePath();
+    const base = o.gnomon ? mix(C.acc, C.elev, 0.35) : mix(C.elev, C.ink, o.tint);
+    // 光の当たる側を少し明るく
+    const lit = mix(base, mix([255,250,238], C.warm, lowSun*0.5), 0.25+alt*0.2);
+    const lg = ctx.createLinearGradient(bx - 40*s, by-140*s, bx + 40*s, by);
+    if (awayX>0){ lg.addColorStop(0, rgb(mix(base,C.ink,0.12))); lg.addColorStop(1, rgb(lit)); }
+    else { lg.addColorStop(0, rgb(lit)); lg.addColorStop(1, rgb(mix(base,C.ink,0.12))); }
+    ctx.fillStyle=lg; ctx.fill();
+    ctx.strokeStyle=rgba(mix(C.ink,base,0.4),0.5); ctx.lineWidth=1; ctx.stroke();
+    // 接地の小さな暗み
+    ctx.fillStyle=rgba(C.ink,0.12); ctx.beginPath(); ctx.ellipse(bx,by,14*s,3.5*s,0,0,6.283); ctx.fill();
+  }
+
+  // ---- 日時計の目盛（中央 gnomon の周り） ----
+  const gno = objects[2];
+  const dcx = cx + gno.gx*W*0.5*0.92, dcy = groundY(gno.depth);
+  const dialR = 118*scaleOf(gno.depth);
+  ctx.strokeStyle=rgba(C.mut,0.5); ctx.lineWidth=1;
+  ctx.save(); ctx.beginPath(); ctx.ellipse(dcx,dcy,dialR,dialR*0.42,0,Math.PI,0); ctx.stroke();
+  for (let hh=0; hh<=12; hh++){
+    const frac = hh/12;                       // 朝→夕を半円に配置
+    const a = Math.PI - frac*Math.PI;
+    const ex = dcx + Math.cos(a)*dialR, ey = dcy - Math.sin(a)*dialR*0.42;
+    const ix = dcx + Math.cos(a)*dialR*0.9, iy = dcy - Math.sin(a)*dialR*0.42*0.9;
+    ctx.strokeStyle = rgba(C.mut, (hh%3===0)?0.85:0.4);
+    ctx.lineWidth = (hh%3===0)?1.6:1;
+    ctx.beginPath(); ctx.moveTo(ix,iy); ctx.lineTo(ex,ey); ctx.stroke();
+  }
+  ctx.restore();
+
+  // ---- スライダー UI ----
+  drawSlider(now);
+  requestAnimationFrame(frame);
+}
+
+let sliderRect = {x:0,y:0,w:0};
+function drawSlider(now){
+  const w = Math.min(360, W*0.7);
+  const x = (W-w)/2, y = H-40;
+  sliderRect = {x,y,w};
+  ctx.strokeStyle = rgba(C.bord,1); ctx.lineWidth=4; ctx.lineCap="round";
+  ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+w,y); ctx.stroke();
+  ctx.fillStyle = rgba(C.mut,0.9); ctx.font="600 11px system-ui"; ctx.textBaseline="middle";
+  ctx.textAlign="left"; ctx.fillText("朝", x-22, y);
+  ctx.textAlign="center"; ctx.fillText("昼", x+w/2, y-16);
+  ctx.textAlign="right"; ctx.fillText("夕", x+w+22, y);
+  const kx = x + t*w;
+  ctx.fillStyle = rgb(C.acc); ctx.beginPath(); ctx.arc(kx,y,9,0,6.283); ctx.fill();
+  ctx.strokeStyle = rgb(C.elev); ctx.lineWidth=2.5; ctx.stroke();
+}
+
+requestAnimationFrame(frame);
+
+// ---- 入力 ----
+function setFromX(clientX){
+  const {x,w} = sliderRect;
+  target = Math.max(0, Math.min(1, (clientX - x)/w));
+}
+canvas.addEventListener("pointerdown",(e)=>{ dragging=true; canvas.setPointerCapture?.(e.pointerId); setFromX(e.clientX); });
+canvas.addEventListener("pointermove",(e)=>{ if(dragging) setFromX(e.clientX); });
+const end=()=>{dragging=false;};
+canvas.addEventListener("pointerup",end); canvas.addEventListener("pointercancel",end);
+})();
+</script>
+</body>
+</html>

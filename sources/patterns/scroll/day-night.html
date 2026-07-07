@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="昼から夜へ">
+<meta name="pattern-desc" content="スクロールで太陽が沈み、空が茜から紺へ移ろい、星が瞬き月が昇る。地平線のシルエットは佇む。">
+<title>昼から夜へ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+  }
+  .track { height: 500vh; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .clock {
+    position: fixed; left: 24px; bottom: 24px; z-index: 3; pointer-events: none;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 74%, transparent);
+    border: 1px solid var(--color-border-default); backdrop-filter: blur(10px);
+  }
+  .clock .t { font-size: 1.4rem; font-weight: 300; letter-spacing: .05em; font-variant-numeric: tabular-nums; }
+  .clock .p { margin-top: 2px; font-size: .74rem; letter-spacing: .2em; color: var(--color-fg-muted); }
+  .meter {
+    position: fixed; right: 26px; top: 50%; transform: translateY(-50%);
+    width: 2px; height: 34vh; border-radius: 2px; z-index: 3;
+    background: var(--color-border-default); pointer-events: none;
+  }
+  .meter i { position: absolute; left: 0; top: 0; width: 100%; border-radius: 2px; background: var(--color-accent-default); height: 0; }
+</style>
+</head>
+<body>
+<div class="track" aria-hidden="true"></div>
+<canvas id="c"></canvas>
+<div class="meter"><i id="mfill"></i></div>
+<div class="clock"><div class="t" id="ctime">12:00</div><div class="p" id="cphase">まひる</div></div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const mfill = document.getElementById("mfill");
+  const ctime = document.getElementById("ctime");
+  const cphase = document.getElementById("cphase");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => { h = h.replace("#", ""); if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const rgb = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const smooth = (t) => t * t * (3 - 2 * t);
+
+  // 生パステル（テーマ背景と混ぜて空を作る素材）
+  const P = { day: hex("#9fc8ea"), noon: hex("#bfe0f2"), amber: hex("#f1d189"),
+              rose: hex("#f0a8bd"), coral: hex("#f3a890"), dusk: hex("#bcb2e8"),
+              navy: hex("#2b3a63"), night: hex("#1a2340"), star: hex("#fdf6e3"),
+              sun: hex("#f6c96a"), moon: hex("#f3efe2") };
+
+  let COL = {};
+  function readColors() {
+    COL.bg = hex(token("--color-bg-primary", "#faf7f1"));
+    COL.elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    COL.ink = hex(token("--color-fg-primary", "#2c2a26"));
+    COL.deep = hex(token("--color-accent-fg", "#07312d"));
+    COL.dark = (COL.bg[0] + COL.bg[1] + COL.bg[2]) / 3 < 128;
+  }
+  readColors();
+  new MutationObserver(readColors).observe(document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  let W = 0, H = 0, horizonY = 0;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    horizonY = H * 0.80;
+    buildStars();
+  }
+
+  // 星（事前生成）
+  let stars = [];
+  let sseed = 2029;
+  const srnd = () => ((sseed = (sseed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  function buildStars() {
+    sseed = 2029; stars = [];
+    for (let i = 0; i < 140; i++) {
+      stars.push({ x: srnd(), y: srnd() * 0.72, r: 0.6 + srnd() * 1.6, ph: srnd() * 6.28, tw: 0.6 + srnd() * 2.2, appear: srnd() });
+    }
+  }
+
+  // 遠山シルエット（決定的な稜線・スクロールでは動かない＝佇む）
+  function silhouette(x) {
+    return Math.sin(x * 0.004 + 1.2) * 30 + Math.sin(x * 0.011 + 3.1) * 16 + Math.sin(x * 0.02 + 0.5) * 8;
+  }
+
+  // 空のキーフレーム：progress 0→1 を昼→薄暮→夕→宵→夜へ。上端色/下端色を配列補間
+  const KEYS = [
+    { at: 0.00, top: P.day,  bot: P.noon,  sun: 1.0 },
+    { at: 0.34, top: P.day,  bot: P.amber, sun: 0.9 },
+    { at: 0.55, top: P.rose, bot: P.coral, sun: 0.5 },   // 夕焼け
+    { at: 0.72, top: P.dusk, bot: P.rose,  sun: 0.15 },  // 薄暮
+    { at: 0.86, top: P.navy, bot: P.dusk,  sun: 0.0 },
+    { at: 1.00, top: P.night, bot: P.navy, sun: 0.0 },
+  ];
+  function skyAt(p) {
+    let i = 0; while (i < KEYS.length - 1 && p > KEYS[i + 1].at) i++;
+    const A = KEYS[i], B = KEYS[Math.min(KEYS.length - 1, i + 1)];
+    const span = Math.max(1e-4, B.at - A.at);
+    const t = smooth(clamp((p - A.at) / span, 0, 1));
+    return { top: mix(A.top, B.top, t), bot: mix(A.bot, B.bot, t), sunI: A.sun + (B.sun - A.sun) * t };
+  }
+
+  let progress = 0;
+  const readScroll = () => {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    progress = max > 0 ? clamp(scrollY / max, 0, 1) : 0;
+  };
+  addEventListener("scroll", readScroll, { passive: true });
+  addEventListener("resize", () => { resize(); readScroll(); });
+  resize(); readScroll();
+
+  let last = performance.now(), time = 0, shown = 0;
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (!rm.matches) time += dt;
+    shown += (progress - shown) * (1 - Math.exp(-dt * 6));
+    const S = skyAt(shown);
+
+    // ダーク外観では全体を沈めて夜を深く
+    const bl = COL.dark ? 0.5 : 1;
+    const skyTop = mix(COL.bg, S.top, 0.62 * bl);
+    const skyBot = mix(COL.bg, S.bot, 0.62 * bl);
+    const g = ctx.createLinearGradient(0, 0, 0, horizonY + 40);
+    g.addColorStop(0, rgb(skyTop)); g.addColorStop(1, rgb(skyBot));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // 星：夜が深まるほど濃く、瞬く
+    const starA = smooth(clamp((shown - 0.6) / 0.35, 0, 1));
+    if (starA > 0.01) {
+      for (const st of stars) {
+        const tw = rm.matches ? 0.7 : 0.55 + Math.sin(time * st.tw + st.ph) * 0.45;
+        const a = starA * (0.4 + st.appear * 0.6) * tw;
+        if (a <= 0.02) continue;
+        ctx.beginPath(); ctx.arc(st.x * W, st.y * H, st.r, 0, 6.28);
+        ctx.fillStyle = rgb(P.star, a); ctx.fill();
+      }
+    }
+
+    // 太陽の弧：progress 0→沈む。x は左→右、y は放物線で地平へ落ちる
+    const sunP = clamp(shown / 0.86, 0, 1);
+    const sunX = W * (0.16 + sunP * 0.66);
+    const sunY = horizonY - Math.sin((1 - sunP) * Math.PI * 0.5) * H * 0.62 + sunP * sunP * 30;
+    if (S.sunI > 0.01) {
+      // 大気の暈（沈むほど赤く大きく）
+      const halo = ctx.createRadialGradient(sunX, sunY, 6, sunX, sunY, 120 + (1 - S.sunI) * 90);
+      const glowC = mix(P.sun, P.coral, 1 - S.sunI);
+      halo.addColorStop(0, rgb(glowC, 0.5 * S.sunI + 0.15));
+      halo.addColorStop(1, rgb(glowC, 0));
+      ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(sunX, sunY, 210, 0, 6.28); ctx.fill();
+      ctx.beginPath(); ctx.arc(sunX, sunY, 30 + (1 - S.sunI) * 8, 0, 6.28);
+      ctx.fillStyle = rgb(mix(P.sun, P.coral, (1 - S.sunI) * 0.7), 0.4 + S.sunI * 0.55); ctx.fill();
+    }
+
+    // 月の弧：夜側で昇る（太陽とは対の軌道）
+    const moonP = clamp((shown - 0.5) / 0.5, 0, 1);
+    if (moonP > 0.01) {
+      const mX = W * (0.82 - moonP * 0.5);
+      const mY = horizonY - Math.sin(moonP * Math.PI * 0.5) * H * 0.55;
+      const mA = smooth(moonP);
+      const mhalo = ctx.createRadialGradient(mX, mY, 4, mX, mY, 90);
+      mhalo.addColorStop(0, rgb(P.moon, 0.28 * mA)); mhalo.addColorStop(1, rgb(P.moon, 0));
+      ctx.fillStyle = mhalo; ctx.beginPath(); ctx.arc(mX, mY, 90, 0, 6.28); ctx.fill();
+      ctx.beginPath(); ctx.arc(mX, mY, 22, 0, 6.28); ctx.fillStyle = rgb(P.moon, 0.9 * mA); ctx.fill();
+      // クレーターの陰（欠けて見せる）
+      ctx.beginPath(); ctx.arc(mX + 9, mY - 6, 20, 0, 6.28);
+      ctx.fillStyle = rgb(mix(P.moon, skyTop, 0.55), 0.9 * mA); ctx.fill();
+    }
+
+    // 地平のシルエット（動かない・佇む）。二重稜線で奥行き
+    const silC1 = mix(COL.ink, S.bot, COL.dark ? 0.15 : 0.28);
+    const silC2 = mix(COL.ink, skyBot, COL.dark ? 0.05 : 0.12);
+    ctx.fillStyle = rgb(silC2, 0.85);
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 8) ctx.lineTo(x, horizonY - 26 + silhouette(x + 400) * 0.7);
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = rgb(silC1, 0.96);
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 8) ctx.lineTo(x, horizonY + silhouette(x));
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+
+    // 水辺の反射（太陽/月の光柱）
+    const reflC = S.sunI > 0.05 ? mix(P.sun, P.coral, 1 - S.sunI) : P.moon;
+    const reflA = S.sunI > 0.05 ? S.sunI * 0.3 : moonP * 0.2;
+    if (reflA > 0.02) {
+      const rx = S.sunI > 0.05 ? sunX : W * (0.82 - moonP * 0.5);
+      for (let y = horizonY + 4; y < H; y += 6) {
+        const wob = rm.matches ? 0 : Math.sin(time * 2 + y * 0.2) * (6 + (y - horizonY) * 0.06);
+        ctx.fillStyle = rgb(reflC, reflA * (1 - (y - horizonY) / (H - horizonY)));
+        ctx.fillRect(rx - 14 + wob, y, 28, 3);
+      }
+    }
+
+    // 時計：progress を 12:00→24:00 にマッピング
+    const mins = Math.round((12 + shown * 12) * 60);
+    const hh = Math.floor(mins / 60) % 24, mm = mins % 60;
+    ctime.textContent = String(hh).padStart(2, "0") + ":" + String(mm).padStart(2, "0");
+    cphase.textContent = shown < 0.34 ? "まひる" : shown < 0.55 ? "かたむく陽"
+      : shown < 0.72 ? "ゆうやけ" : shown < 0.86 ? "たそがれ" : "よる";
+    mfill.style.height = (shown * 100).toFixed(1) + "%";
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

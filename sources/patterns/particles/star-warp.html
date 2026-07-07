@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>星のワープ</title>
+<meta name="pattern-title" content="星のワープ">
+<meta name="pattern-desc" content="中心から外へ流れる星のワープ航行。ホールドで加速して線が伸び、離すと減速する。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; display: block; touch-action: none; cursor: crosshair; }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .04em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hint">押している間ワープ加速 / 中心はポインタに追従</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d");
+  const root = document.documentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+  let COL = {};
+  function readColors() {
+    COL = {
+      bg:     token("--color-bg-primary", "#faf7f1"),
+      ink:    token("--color-fg-primary", "#2c2a26"),
+      soft:   token("--color-fg-secondary", "#6c655b"),
+      accent: token("--color-accent-default", "#5bbcb1"),
+    };
+  }
+  readColors();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  let W = 0, H = 0, DPR = 1;
+  const stars = [];
+  const N = 520;
+  // 3D 星: 中心を原点、z が視点からの奥行き。透視投影で 2D へ落とす
+  const FOV = 320;
+
+  function spawn(s, far) {
+    const ang = Math.random() * Math.PI * 2;
+    const r = 40 + Math.random() * 900;
+    s.x = Math.cos(ang) * r;
+    s.y = Math.sin(ang) * r;
+    s.z = far ? (1200 + Math.random() * 400) : (Math.random() * 1200 + 40);
+    s.pz = s.z;
+    s.tone = Math.random(); // 星色のばらつき
+  }
+  function initStars() {
+    stars.length = 0;
+    for (let i = 0; i < N; i++) {
+      const s = {};
+      spawn(s, false);
+      stars.push(s);
+    }
+  }
+
+  let W2 = 0, H2 = 0;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    W2 = W / 2; H2 = H / 2;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  // ワープ中心（ポインタ追従）: 画面座標
+  let cx, cy, tcx, tcy;
+  function initCenter() { cx = tcx = W2; cy = tcy = H2; }
+
+  let holding = false;
+  let warp = 1;      // 現在の速度倍率
+  const BASE = 120;  // 基本速度(z/秒)
+
+  function pointer(e) {
+    tcx = e.clientX; tcy = e.clientY;
+  }
+  canvas.addEventListener("pointermove", pointer);
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture?.(e.pointerId);
+    holding = true; pointer(e);
+  });
+  const release = () => { holding = false; };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("pointerleave", release);
+
+  function starColor(tone) {
+    // 温度っぽい淡色: accent 寄り(青緑)〜インク寄り。ワープの主役は accent
+    return tone > 0.6 ? COL.accent : (tone > 0.3 ? COL.soft : COL.ink);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    // 中心を滑らかに追従（イージング）
+    const follow = 1 - Math.exp(-6 * dt);
+    cx += (tcx - cx) * follow;
+    cy += (tcy - cy) * follow;
+
+    // 速度倍率を目標へ緩やかに（ホールドで加速、離すと減速）
+    const target = reduce.matches ? 1 : (holding ? 7.5 : 1);
+    warp += (target - warp) * (1 - Math.exp(-3.5 * dt));
+    const speed = BASE * warp;
+
+    // 生成りベースに薄く残像を残して線を伸ばす
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = COL.bg;
+    ctx.globalAlpha = reduce.matches ? 1 : (0.28 + 0.4 / warp);
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+
+    for (const s of stars) {
+      s.pz = s.z;
+      s.z -= speed * dt;
+      if (s.z < 1) { spawn(s, true); continue; }
+
+      const k = FOV / s.z;
+      const sx = cx + s.x * k;
+      const sy = cy + s.y * k;
+      const pk = FOV / s.pz;
+      const px = cx + s.x * pk;
+      const py = cy + s.y * pk;
+
+      if (sx < -50 || sx > W + 50 || sy < -50 || sy > H + 50) {
+        // 画面外に出たら奥へ戻す
+        if (s.z < 60) spawn(s, true);
+        continue;
+      }
+
+      // 近いほど大きく明るい
+      const depth = 1 - s.z / 1400;
+      const size = Math.max(0.4, k * 0.9);
+      ctx.strokeStyle = starColor(s.tone);
+      ctx.globalAlpha = Math.min(1, 0.25 + depth * 0.85);
+      ctx.lineWidth = size;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(sx, sy);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("resize", () => { resize(); });
+  resize();
+  initCenter();
+  initStars();
+  // 背景を一度塗る
+  ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="木漏れ日">
+<meta name="pattern-desc" content="枝葉の間から差し込む光芒がゆらめく。ポインタで光源がわずかに動き、塵が舞う。">
+<title>木漏れ日</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary);
+  }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap; text-align: center;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">枝葉から差し込む光 ─ ポインタを動かすと光源が寄り添う</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+/* ---- テーマトークン ---- */
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const lum = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+
+const C = {};
+const refresh = () => {
+  const bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  const bg2 = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  const ink = hexRgb(token("--color-accent-fg", "#07312d"));
+  const dark = lum(bg) < 0.4;
+  // 森の陰。光が映えるよう暗い緑インクを敷く
+  C.top = dark ? bg2 : mix(bg2, ink, 0.86);
+  C.bot = dark ? bg : mix(bg, ink, 0.94);
+  // 陽の色: 温かい黄〜生成り
+  C.warm = hexRgb("#f1d189");
+  C.warm2 = hexRgb("#fffdf9");
+  C.dust = mix(C.warm, [255, 255, 255], 0.4);
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+/* ---- 値ノイズ + fbm ---- */
+const perm = new Uint8Array(512);
+(() => {
+  const p = [...Array(256).keys()];
+  for (let i = 255; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [p[i], p[j]] = [p[j], p[i]]; }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+})();
+const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+const lerp = (a, b, t) => a + (b - a) * t;
+const vnoise = (x, y) => {
+  const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+  const xf = x - Math.floor(x), yf = y - Math.floor(y);
+  const u = fade(xf), v = fade(yf);
+  const N = (h) => h / 255;
+  const aa = perm[perm[X] + Y], ba = perm[perm[X + 1] + Y];
+  const ab = perm[perm[X] + Y + 1], bb = perm[perm[X + 1] + Y + 1];
+  return lerp(lerp(N(aa), N(ba), u), lerp(N(ab), N(bb), u), v);
+};
+const fbm = (x, y) => {
+  let s = 0, a = 0.5, f = 1, n = 0;
+  for (let i = 0; i < 4; i++) { s += a * vnoise(x * f, y * f); n += a; f *= 2; a *= 0.5; }
+  return s / n; // 0..1
+};
+
+/* ---- キャンバス ---- */
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+window.addEventListener("resize", resize);
+resize();
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+/* ---- 光源(ポインタで少し動く) ---- */
+const src = { x: 0, y: 0, tx: 0, ty: 0 };
+const initSrc = () => { src.x = src.tx = W * 0.32; src.y = src.ty = -H * 0.12; };
+initSrc();
+window.addEventListener("pointermove", (e) => {
+  // 画面上端付近を基準に、ポインタへ少しだけ引き寄せる(大きくは動かさない)
+  src.tx = W * 0.32 + (e.clientX - W * 0.5) * 0.18;
+  src.ty = -H * 0.12 + (e.clientY - H * 0.5) * 0.05;
+}, { passive: true });
+
+/* ---- 塵(光の中で舞う) ---- */
+const motes = Array.from({ length: 70 }, () => ({
+  x: Math.random() * W, y: Math.random() * H,
+  r: Math.random() * 1.6 + 0.4, ph: Math.random() * Math.PI * 2,
+  sp: 0.2 + Math.random() * 0.5, drift: (Math.random() - 0.5) * 8,
+}));
+
+/* ---- 描画 ---- */
+let t = 0, last = performance.now();
+
+/* 放射状の光芒を扇状の三角で積む。角度ごとに動くノイズで強弱をつける */
+function drawRays() {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  const cx = src.x, cy = src.y;
+  const R = Math.hypot(W, H) * 1.25;
+  const N = 130;
+  // 光の広がる中心方向(下向き)
+  for (let i = 0; i < N; i++) {
+    const a0 = (i / N) * Math.PI * 2;
+    // 下半分に強く出す指向性
+    const dir = Math.max(0, Math.cos(a0 - Math.PI / 2)) ** 1.4;
+    if (dir < 0.02) continue;
+    // 枝葉のマスク: 角度と時間で動くノイズ
+    const nz = fbm(i * 0.09 + 10, t * 0.16);
+    const flick = fbm(i * 0.4, t * 0.5 + 3);
+    const beam = Math.max(0, nz - 0.42) * 2.0 * (0.55 + 0.45 * flick);
+    if (beam < 0.02) continue;
+    const wdt = 0.010 + 0.016 * nz;
+    const aL = a0 - wdt, aR = a0 + wdt;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    g.addColorStop(0, rgba(C.warm2, 0.0));
+    g.addColorStop(0.05, rgba(C.warm2, 0.20 * beam * dir));
+    g.addColorStop(0.45, rgba(C.warm, 0.13 * beam * dir));
+    g.addColorStop(1, rgba(C.warm, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(aL) * R, cy + Math.sin(aL) * R);
+    ctx.lineTo(cx + Math.cos(aR) * R, cy + Math.sin(aR) * R);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // 光源そのものの淡いにじみ
+  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, H * 0.5);
+  halo.addColorStop(0, rgba(C.warm2, 0.30));
+  halo.addColorStop(0.4, rgba(C.warm, 0.10));
+  halo.addColorStop(1, rgba(C.warm, 0));
+  ctx.fillStyle = halo;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (!reduced) t += dt;
+  src.x += (src.tx - src.x) * Math.min(1, dt * 2.5);
+  src.y += (src.ty - src.y) * Math.min(1, dt * 2.5);
+
+  // 背景(森の陰)
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, rgba(C.top, 1));
+  bg.addColorStop(1, rgba(C.bot, 1));
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // 光芒
+  drawRays();
+
+  // 塵(光源に近いほど明るく)
+  ctx.globalCompositeOperation = "lighter";
+  for (const m of motes) {
+    if (!reduced) {
+      m.x += Math.sin(t * m.sp + m.ph) * 0.3 + m.drift * dt;
+      m.y += (Math.cos(t * m.sp * 0.7 + m.ph) * 0.2 + 0.25) ;
+    }
+    if (m.y > H + 4) { m.y = -4; m.x = Math.random() * W; }
+    if (m.x < -4) m.x = W + 4; if (m.x > W + 4) m.x = -4;
+    const d = Math.hypot(m.x - src.x, m.y - src.y);
+    const glow = Math.max(0, 1 - d / (H * 0.9));
+    const tw = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * 2 + m.ph));
+    ctx.beginPath();
+    ctx.fillStyle = rgba(C.dust, 0.5 * glow * tw);
+    ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = "source-over";
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

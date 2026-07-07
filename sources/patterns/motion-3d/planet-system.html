@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="惑星の軌道">
+<meta name="pattern-desc" content="自前の3D投影で描く小さな太陽系。ドラッグで視点を回すと、軌道リングと惑星が奥行きを保ったまま巡る。">
+<title>惑星の軌道</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-primary); color: var(--color-fg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #stage.dragging { cursor: grabbing; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">ドラッグで視点をまわす ─ 軌道は少しずつ傾いている</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const reduceMq = matchMedia("(prefers-reduced-motion: reduce)");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const C = {};
+const refreshColors = () => {
+  C.bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.muted = hexRgb(token("--color-fg-muted", "#a79f91"));
+  C.acc = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.sunCore = mix(hexRgb("#f1d189"), C.bg, 0.08);
+  C.dark = (0.299 * C.bg[0] + 0.587 * C.bg[1] + 0.114 * C.bg[2]) / 255 < 0.45;
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス ----
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+resize();
+addEventListener("resize", resize);
+
+// ---- 惑星データ（軌道半径・大きさ・速さは開放軌道風に r^-1.5 で減速）----
+const PASTEL = { pink: "#f0a8bd", yellow: "#f1d189", lavender: "#bcb2e8", coral: "#f3a890", sky: "#9fc8ea", mint: "#a9dcc0", teal: "#5bbcb1" };
+const planets = [
+  { R: 70,  size: 4.5, col: hexRgb(PASTEL.coral),    incl: 0.10, node: 0.4, a: 0.7 },
+  { R: 105, size: 7,   col: hexRgb(PASTEL.yellow),   incl: 0.05, node: 2.1, a: 2.3 },
+  { R: 145, size: 7.5, col: hexRgb(PASTEL.sky),      incl: 0.08, node: 4.6, a: 4.1, moon: true },
+  { R: 190, size: 6,   col: hexRgb(PASTEL.pink),     incl: 0.14, node: 1.2, a: 5.4 },
+  { R: 245, size: 11,  col: hexRgb(PASTEL.teal),     incl: 0.04, node: 3.3, a: 0.2, ringed: true },
+  { R: 305, size: 9,   col: hexRgb(PASTEL.lavender), incl: 0.18, node: 5.5, a: 3.0 },
+];
+for (const p of planets) p.w = 8.5 / Math.pow(p.R, 1.5) * 60; // 角速度
+
+// ---- 背景の星（大きな球面上に固定 → 視点回転でパララックス）----
+const stars = [];
+{
+  let s = 12345;
+  const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 140; i++) {
+    const th = rnd() * Math.PI * 2, ph = Math.acos(rnd() * 2 - 1), r = 900;
+    stars.push({ x: r * Math.sin(ph) * Math.cos(th), y: r * Math.cos(ph), z: r * Math.sin(ph) * Math.sin(th), tw: rnd() * 6.28, sz: 0.6 + rnd() * 1.1 });
+  }
+}
+
+// ---- 視点 ----
+const view = { yaw: 0.6, pitch: 0.42, vyaw: 0, vpitch: 0 };
+const CAM = 620, FOCAL = 640;
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  canvas.classList.add("dragging"); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  view.yaw += dx * 0.006; view.pitch += dy * 0.006;
+  view.vyaw = dx * 0.006; view.vpitch = dy * 0.006;
+  view.pitch = Math.max(-1.35, Math.min(1.35, view.pitch));
+});
+const endDrag = () => { dragging = false; canvas.classList.remove("dragging"); };
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+// ---- 3D 投影 ----
+let cy_, sy_, cp_, sp_;
+const project = (x, y, z) => {
+  // 視点回転: Ry(yaw) → Rx(pitch)
+  const x1 = x * cy_ + z * sy_, z1 = -x * sy_ + z * cy_;
+  const y2 = y * cp_ - z1 * sp_, z2 = y * sp_ + z1 * cp_;
+  const depth = CAM + z2;
+  const s = FOCAL / Math.max(60, depth);
+  return { x: W / 2 + x1 * s, y: H / 2 + y2 * s, s, depth };
+};
+const orbitPoint = (p, ang) => {
+  // 軌道面: Ry(node) * Rx(incl) * (cos,0,sin)
+  const ox = Math.cos(ang) * p.R, oz = Math.sin(ang) * p.R;
+  const y1 = -oz * Math.sin(p.incl), z1 = oz * Math.cos(p.incl);
+  const cn = Math.cos(p.node), sn = Math.sin(p.node);
+  return [ox * cn + z1 * sn, y1, -ox * sn + z1 * cn];
+};
+
+// ---- 描画 ----
+let last = performance.now();
+const frame = (now) => {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const reduce = reduceMq.matches;
+
+  if (!dragging) {
+    view.yaw += view.vyaw; view.pitch += view.vpitch;
+    view.vyaw *= 0.94; view.vpitch *= 0.94;
+    view.pitch = Math.max(-1.35, Math.min(1.35, view.pitch));
+    if (!reduce) view.yaw += dt * 0.03; // ゆっくり自転
+  }
+  if (!reduce) for (const p of planets) p.a += p.w * dt;
+
+  cy_ = Math.cos(view.yaw); sy_ = Math.sin(view.yaw);
+  cp_ = Math.cos(view.pitch); sp_ = Math.sin(view.pitch);
+
+  ctx.clearRect(0, 0, W, H);
+
+  // 星（惑星より常に奥なので先に描く）
+  for (const st of stars) {
+    const q = project(st.x, st.y, st.z);
+    if (q.depth < 80) continue;
+    const tw = reduce ? 0.6 : 0.5 + 0.4 * Math.sin(now / 900 + st.tw);
+    ctx.fillStyle = rgba(C.muted, 0.35 * tw);
+    ctx.beginPath(); ctx.arc(q.x, q.y, st.sz, 0, 6.283); ctx.fill();
+  }
+
+  // 描画アイテムを集めて z ソート（軌道リングはセグメント単位）
+  const items = [];
+  const SEG = 90;
+  for (const p of planets) {
+    let prev = null;
+    for (let i = 0; i <= SEG; i++) {
+      const w = orbitPoint(p, (i / SEG) * Math.PI * 2);
+      const q = project(w[0], w[1], w[2]);
+      if (prev) items.push({ depth: (prev.depth + q.depth) / 2, kind: "seg", a: prev, b: q });
+      prev = q;
+    }
+    const w = orbitPoint(p, p.a);
+    items.push({ depth: project(w[0], w[1], w[2]).depth, kind: "planet", p, w });
+  }
+  items.push({ depth: project(0, 0, 0).depth, kind: "sun" });
+  items.sort((a, b) => b.depth - a.depth); // 遠い順
+
+  const maxD = CAM + 340, minD = CAM - 340;
+  const fog = (d) => Math.max(0, Math.min(1, 1 - (d - minD) / (maxD - minD))); // 1=手前
+  const sunQ = project(0, 0, 0);
+
+  for (const it of items) {
+    const near = fog(it.depth);
+    if (it.kind === "seg") {
+      ctx.strokeStyle = rgba(mix(C.muted, C.ink, near * 0.3), 0.12 + near * 0.26);
+      ctx.lineWidth = 0.6 + near * 0.9;
+      ctx.beginPath(); ctx.moveTo(it.a.x, it.a.y); ctx.lineTo(it.b.x, it.b.y); ctx.stroke();
+    } else if (it.kind === "sun") {
+      const r = 20 * sunQ.s;
+      const glow = ctx.createRadialGradient(sunQ.x, sunQ.y, r * 0.2, sunQ.x, sunQ.y, r * 3.4);
+      glow.addColorStop(0, rgba(C.sunCore, 0.55)); glow.addColorStop(1, rgba(C.sunCore, 0));
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(sunQ.x, sunQ.y, r * 3.4, 0, 6.283); ctx.fill();
+      const core = ctx.createRadialGradient(sunQ.x - r * 0.25, sunQ.y - r * 0.25, r * 0.1, sunQ.x, sunQ.y, r);
+      core.addColorStop(0, rgba(mix(C.sunCore, [255, 255, 255], 0.5), 1));
+      core.addColorStop(1, rgba(C.sunCore, 0.95));
+      ctx.fillStyle = core;
+      ctx.beginPath(); ctx.arc(sunQ.x, sunQ.y, r, 0, 6.283); ctx.fill();
+    } else {
+      const q = project(it.w[0], it.w[1], it.w[2]);
+      const r = it.p.size * q.s * 3.2;
+      const col = C.dark ? mix(it.p.col, [255, 255, 255], 0.08) : it.p.col;
+      // 太陽方向のハイライトで球らしく
+      const dx = sunQ.x - q.x, dy = sunQ.y - q.y, L = Math.hypot(dx, dy) || 1;
+      const g = ctx.createRadialGradient(q.x + dx / L * r * 0.45, q.y + dy / L * r * 0.45, r * 0.15, q.x, q.y, r * 1.15);
+      g.addColorStop(0, rgba(mix(col, [255, 255, 255], 0.45), 1));
+      g.addColorStop(0.55, rgba(col, 1));
+      g.addColorStop(1, rgba(mix(col, C.bg, 0.5), 1));
+      ctx.globalAlpha = 0.35 + near * 0.65;
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, 6.283); ctx.fill();
+      if (it.p.ringed) { // 土星風の環
+        ctx.strokeStyle = rgba(mix(col, C.ink, 0.25), 0.6);
+        ctx.lineWidth = 1.2 + near;
+        ctx.beginPath(); ctx.ellipse(q.x, q.y, r * 1.9, r * 0.62, -0.4 + view.yaw * 0.15, 0, 6.283); ctx.stroke();
+      }
+      if (it.p.moon) { // 月
+        const ma = it.p.a * 6.5;
+        const m = project(it.w[0] + Math.cos(ma) * 18, it.w[1] + Math.sin(ma) * 6, it.w[2] + Math.sin(ma) * 18);
+        ctx.fillStyle = rgba(mix(C.muted, C.bg, 0.2), 0.9);
+        ctx.beginPath(); ctx.arc(m.x, m.y, Math.max(1.2, 1.6 * m.s * 3.2), 0, 6.283); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+  requestAnimationFrame(frame);
+};
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

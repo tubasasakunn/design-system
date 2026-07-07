@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="はためく旗">
+<meta name="pattern-desc" content="Verlet クロスシミュレーションの旗が風にはためく。風速を調整でき、ポインタで突くと波が走る。">
+<title>はためく旗</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif; background: var(--color-bg-secondary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  .ui {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 14px; align-items: center;
+    padding: .7rem 1.25rem; border-radius: 999px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);
+    border: 1px solid var(--color-border-default); backdrop-filter: blur(8px);
+    font-size: .8rem; color: var(--color-fg-secondary); letter-spacing: .04em; white-space: nowrap;
+  }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 150px; height: 5px; border-radius: 999px;
+    background: color-mix(in srgb, var(--color-fg-muted) 30%, transparent); outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 17px; height: 17px; border-radius: 50%;
+    background: var(--color-accent-default); cursor: pointer; border: 2px solid var(--color-bg-elevated);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 17px; height: 17px; border-radius: 50%; border: 2px solid var(--color-bg-elevated);
+    background: var(--color-accent-default); cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="ui">
+  <span>風速</span>
+  <input type="range" id="wind" min="0" max="100" value="46" aria-label="風速">
+  <span style="opacity:.7">突くと波が走る</span>
+</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const windSlider = document.getElementById("wind");
+
+const token=(n,fb)=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||fb;
+const hexRgb=(h)=>{ h=h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c);
+  const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const rgba=(c,a)=>`rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const mix=(a,b,t)=>[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t];
+const C={};
+const refresh=()=>{
+  C.cloth  = hexRgb(token("--color-accent-default","#5bbcb1"));
+  C.clothD = hexRgb(token("--color-accent-hover","#46a89d"));
+  C.hi     = hexRgb(token("--color-bg-elevated","#fffdf9"));
+  C.pole   = hexRgb(token("--color-fg-muted","#a79f91"));
+  C.ink    = hexRgb(token("--color-fg-primary","#2c2a26"));
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme","data-appearance"]});
+
+let W=0,H=0,dpr=1;
+const resize=()=>{ dpr=Math.min(2,window.devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); build(); };
+addEventListener("resize",resize);
+
+const rmq=matchMedia("(prefers-reduced-motion: reduce)");
+let reduced=rmq.matches; rmq.addEventListener?.("change",e=>reduced=e.matches);
+
+// ---- クロス（Verlet 質点＋距離制約）----
+const COLS=34, ROWS=22;
+let px0=0, py0=0, spacing=0, pts=[], cons=[];
+function build(){
+  const fw=Math.min(W*0.62, 720), fh=fw*0.62;
+  spacing = Math.min(fw/(COLS-1), fh/(ROWS-1));
+  px0 = W*0.5 - (COLS-1)*spacing/2 + 10;
+  py0 = H*0.5 - (ROWS-1)*spacing/2;
+  pts=[]; cons=[];
+  for (let j=0;j<ROWS;j++) for (let i=0;i<COLS;i++){
+    const x=px0+i*spacing, y=py0+j*spacing;
+    pts.push({ x,y,ox:x,oy:y, pinned:i===0 }); // 左端を旗竿に固定
+  }
+  const id=(i,j)=>j*COLS+i;
+  for (let j=0;j<ROWS;j++) for (let i=0;i<COLS;i++){
+    if (i<COLS-1) cons.push([id(i,j),id(i+1,j),spacing]);
+    if (j<ROWS-1) cons.push([id(i,j),id(i,j+1),spacing]);
+    // せん断（対角）で布が畳まれすぎるのを防ぐ
+    if (i<COLS-1&&j<ROWS-1){ cons.push([id(i,j),id(i+1,j+1),spacing*Math.SQRT2,0.35]);
+      cons.push([id(i+1,j),id(i,j+1),spacing*Math.SQRT2,0.35]); }
+  }
+}
+const IDX=(i,j)=>j*COLS+i;
+
+// ---- 風・入力 ----
+let windLevel=0.46;
+windSlider.addEventListener("input",()=>{ windLevel=windSlider.value/100; });
+let poke=null;
+function onPoke(x,y){ poke={x,y}; }
+canvas.addEventListener("pointerdown",(e)=>{ canvas.setPointerCapture?.(e.pointerId); onPoke(e.clientX,e.clientY); });
+canvas.addEventListener("pointermove",(e)=>{ if (e.buttons) onPoke(e.clientX,e.clientY); });
+canvas.addEventListener("pointerup",()=>{ poke=null; });
+canvas.addEventListener("pointercancel",()=>{ poke=null; });
+
+// ---- シミュレーション ----
+const GRAV=260, DRAG=0.008;
+let t=0;
+function simulate(dt){
+  t+=dt;
+  const wind = windLevel;
+  // Verlet 積分（前フレーム位置は ox,oy）
+  for (const p of pts){
+    if (p.pinned){ p.ox=p.x; p.oy=p.y; continue; }
+    // 波打つ風：位置・時間で変化する乱流
+    const wx = wind*(220 + Math.sin(t*2.1 + p.y*0.02)*160 + Math.sin(t*3.7 + p.x*0.015)*90);
+    const wy = wind*(Math.sin(t*2.6 + p.x*0.02 + p.y*0.03)*70);
+    const vx=(p.x-p.ox)*(1-DRAG), vy=(p.y-p.oy)*(1-DRAG);
+    const nx=p.x+vx+wx*dt*dt, ny=p.y+vy+(wy+GRAV)*dt*dt;
+    p.ox=p.x; p.oy=p.y; p.x=nx; p.y=ny;
+  }
+  // ポインタで突く：近傍を押しやり波を作る
+  if (poke){
+    for (const p of pts){ if (p.pinned) continue;
+      const dx=p.x-poke.x, dy=p.y-poke.y, d2=dx*dx+dy*dy, rad=90;
+      if (d2<rad*rad){ const d=Math.sqrt(d2)||1, f=(1-d/rad)*26;
+        p.x+=dx/d*f; p.y+=dy/d*f; } }
+  }
+  // 距離制約を反復で解く（縫い合わせ）
+  const ITER=4;
+  for (let k=0;k<ITER;k++){
+    for (const c of cons){
+      const a=pts[c[0]], b=pts[c[1]], rest=c[2], stiff=c[3]??1;
+      let dx=b.x-a.x, dy=b.y-a.y; const d=Math.hypot(dx,dy)||1e-6;
+      const diff=(d-rest)/d*0.5*stiff;
+      const ox=dx*diff, oy=dy*diff;
+      if (!a.pinned){ a.x+=ox; a.y+=oy; }
+      if (!b.pinned){ b.x-=ox; b.y-=oy; }
+    }
+    // 竿への固定を厳密化
+    for (let j=0;j<ROWS;j++){ const p=pts[IDX(0,j)]; p.x=px0; p.y=py0+j*spacing; }
+  }
+}
+
+// ---- 描画：各セルを法線で陰影づけして布らしく ----
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // 旗竿
+  ctx.beginPath(); ctx.moveTo(px0, py0-24); ctx.lineTo(px0, py0+(ROWS-1)*spacing+70);
+  ctx.lineWidth=7; ctx.lineCap="round"; ctx.strokeStyle=rgba(C.pole,0.9); ctx.stroke();
+  ctx.beginPath(); ctx.arc(px0, py0-26, 7, 0, Math.PI*2); ctx.fillStyle=rgba(C.clothD,1); ctx.fill();
+
+  const light={x:-0.5,y:-0.35,z:0.79};
+  for (let j=0;j<ROWS-1;j++) for (let i=0;i<COLS-1;i++){
+    const a=pts[IDX(i,j)], b=pts[IDX(i+1,j)], c=pts[IDX(i+1,j+1)], d=pts[IDX(i,j+1)];
+    // 疑似 z：横方向の伸び縮みで奥行きを推定（縮む＝手前へ折れる）
+    const restW=spacing, curW=Math.hypot(b.x-a.x,b.y-a.y);
+    const fold=(curW/restW); // <1 で折れている
+    // 面の傾きを「横方向のたわみ」から擬似法線化
+    const nx=(b.y-a.y)/(restW), nz=Math.max(0.15, fold-0.2);
+    const nlen=Math.hypot(nx,nz)||1;
+    let sh=(nx/nlen*light.x + nz/nlen*light.z);
+    sh=Math.max(0, Math.min(1, 0.5+sh*0.6));
+    // 縞（交互の色）で布のはためきを強調
+    const stripe = ((i+ (j&1))>>1)&1;
+    const base = stripe? mix(C.cloth,C.hi,0.16) : C.cloth;
+    const col = mix(mix(C.clothD,base,0.5), C.hi, sh*0.5);
+    ctx.beginPath();
+    ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.lineTo(c.x,c.y); ctx.lineTo(d.x,d.y); ctx.closePath();
+    ctx.fillStyle=rgba(col.map(Math.round),1); ctx.fill();
+    // 継ぎ目をわずかに描いて折り目感
+    ctx.strokeStyle=rgba(col.map(Math.round),0.5); ctx.lineWidth=0.5; ctx.stroke();
+  }
+  // ポインタの波紋位置
+  if (poke){ ctx.beginPath(); ctx.arc(poke.x,poke.y,14,0,Math.PI*2);
+    ctx.strokeStyle=rgba(C.ink,0.2); ctx.lineWidth=2; ctx.stroke(); }
+}
+
+resize();
+let last=performance.now(), acc=0;
+function frame(now){
+  let dt=(now-last)/1000; last=now; if (dt>0.05) dt=0.05;
+  if (reduced){
+    // 常時アニメ停止：静止した垂れ布のみ。突いた時だけ少し動かす
+    if (poke){ acc+=dt; const h=1/120; while(acc>=h){ simulate(h); acc-=h; } }
+  } else {
+    acc+=dt; const h=1/120; let s=0; while(acc>=h && s<10){ simulate(h); acc-=h; s++; }
+  }
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

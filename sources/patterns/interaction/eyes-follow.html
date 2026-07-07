@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>見つめる目</title>
+<meta name="pattern-title" content="見つめる目">
+<meta name="pattern-desc" content="丸いキャラたちの目がカーソルを追う。近づくと驚いて見開き、頭を撫でると目を細め、たまに瞬きする。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100dvh; }
+  .hud { position: fixed; left:0; right:0; bottom:24px; text-align:center; pointer-events:none; }
+  .hud h1 { font-size: clamp(18px,3.6vw,26px); font-weight:600; letter-spacing:.04em; margin:0 0 6px; }
+  .hud p { margin:0; font-size:13px; line-height:1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div class="hud">
+    <h1>見つめる目</h1>
+    <p>カーソルを動かすと目が追いかけます。近づくと驚き、頭をなでると目を細めます。</p>
+  </div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+
+  // 各キャラのボディはパステル。目玉は白、瞳は濃色インク。
+  const TINTS = [
+    ["#5bbcb1","#07312d"], ["#f0a8bd","#5a2436"], ["#f1d189","#5a4611"],
+    ["#bcb2e8","#2f2a55"], ["#f3a890","#5a2b1c"], ["#9fc8ea","#123049"], ["#a9dcc0","#134030"],
+  ];
+  let COL={};
+  function readColors(){
+    COL = {
+      eyeW: token("--color-bg-elevated","#fffdf9"),
+      shadow: "rgba(40,35,25,.22)",
+      border: token("--color-border-default","#ece6db"),
+    };
+  }
+  readColors();
+
+  let W=0,H=0,dpr=1;
+  const chars=[];
+  function build(){
+    dpr = Math.min(2, devicePixelRatio || 1);
+    W=innerWidth; H=innerHeight;
+    cv.width=W*dpr; cv.height=H*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    place();
+  }
+  function place(){
+    chars.length=0;
+    const area = W*H;
+    const count = Math.max(5, Math.min(11, Math.round(area/150000)));
+    const R = Math.max(46, Math.min(84, Math.sqrt(area/count)/3.2));
+    // ポアソン風に重ならないよう配置（試行つき）
+    const margin = R+30;
+    let tries=0;
+    while (chars.length < count && tries < count*60){
+      tries++;
+      const x = margin + Math.random()*(W-2*margin);
+      const y = margin + 30 + Math.random()*(H-2*margin-120);
+      let ok=true;
+      for (const c of chars) if (Math.hypot(c.x-x,c.y-y) < (c.r+R)*1.05){ ok=false; break; }
+      if (!ok) continue;
+      const [body,ink]=TINTS[chars.length % TINTS.length];
+      const r = R*(0.82+Math.random()*0.36);
+      chars.push({
+        x,y,r, body, ink,
+        // 目の状態: open=まぶたの開き(0..1.4), pupilx/y=瞳の相対位置(平滑化),
+        open:1, openT:1, blink:0, blinkTimer: 1+Math.random()*4,
+        squint:0,             // 撫でられ具合
+        px:0, py:0,           // 瞳オフセット（平滑）
+        bob: Math.random()*Math.PI*2,   // 上下呼吸の位相
+      });
+    }
+  }
+  build();
+  addEventListener("resize", build);
+
+  let mx=-1e5, my=-1e5, active=false, lastMoveT=0;
+  const trail=[];   // 撫で検出用の最近ポインタ
+  function onMove(e){
+    mx=e.clientX; my=e.clientY; active=true; lastMoveT=performance.now();
+    trail.push({x:mx,y:my,t:lastMoveT});
+    if (trail.length>6) trail.shift();
+  }
+  cv.addEventListener("pointermove", onMove, {passive:true});
+  cv.addEventListener("pointerdown", onMove);
+  cv.addEventListener("pointerleave", ()=>{ active=false; });
+
+  const SURPRISE_R = 150;   // これより近いと驚く
+  const PET_SPEED = 0.6;    // 撫でと判定する最低速度(px/ms)
+
+  let last=performance.now();
+  function frame(now){
+    let dt=(now-last)/1000; last=now;
+    if (dt>0.05) dt=0.05;
+
+    // ポインタ速度（撫で判定用）
+    let speed=0, dirx=0;
+    if (trail.length>=2 && now-lastMoveT<120){
+      const a=trail[0], b=trail[trail.length-1];
+      const ddt=(b.t-a.t)||16;
+      speed=Math.hypot(b.x-a.x,b.y-a.y)/ddt;
+      dirx=Math.sign(b.x-a.x);
+    }
+
+    ctx.clearRect(0,0,W,H);
+
+    for (const c of chars){
+      c.bob += dt*1.4;
+      const bobY = reduce?0:Math.sin(c.bob)*2.2;
+      const cx=c.x, cy=c.y+bobY;
+
+      // カーソルへの方向と距離
+      const dx=mx-cx, dy=my-cy, dist=Math.hypot(dx,dy);
+      const near = active && dist < SURPRISE_R;
+
+      // 驚き: 近いほど目を見開く（openT を上げる）
+      let openTarget = 1;
+      if (near && !reduce){
+        const s = 1 - dist/SURPRISE_R;      // 0..1
+        openTarget = 1 + s*0.5;             // 最大 1.5 に見開く
+      }
+
+      // 撫で: ポインタが頭の上側(上半分)を速く通過 → 目を細める
+      const overTop = active && dist < c.r*1.15 && (my-cy) < c.r*0.25;
+      if (overTop && speed>PET_SPEED && !reduce){
+        c.squint = Math.min(1, c.squint + dt*5);
+      } else {
+        c.squint = Math.max(0, c.squint - dt*1.6);
+      }
+      openTarget *= (1 - c.squint*0.7);
+
+      // まばたき
+      c.blinkTimer -= dt;
+      if (c.blinkTimer<=0 && c.blink<=0 && !reduce){ c.blink=1; c.blinkTimer=2.5+Math.random()*4.5; }
+      if (c.blink>0) c.blink = Math.max(0, c.blink - dt*7);   // 素早く閉じて開く
+      const blinkClose = Math.sin(Math.min(1,c.blink)*Math.PI); // 0→1→0
+
+      // openT を目標へ平滑化（驚きはキビキビ）
+      c.openT += (openTarget - c.openT) * (1 - Math.pow(0.001, dt));
+      const openNow = Math.max(0.04, c.openT * (1 - blinkClose*0.95));
+
+      // 瞳オフセット: カーソル方向、目半径内にクランプ。近いと寄り目気味。
+      const eyeR = c.r*0.30;
+      const pupilRange = eyeR*0.42;
+      let tx=0,ty=0;
+      if (active){
+        const nx=dx/(dist||1), ny=dy/(dist||1);
+        const reach = Math.min(1, dist/ (c.r*2));   // 近すぎると瞳は端まで行かない
+        tx = nx*pupilRange*(0.5+0.5*reach);
+        ty = ny*pupilRange*(0.5+0.5*reach);
+      }
+      c.px += (tx-c.px)*(1-Math.pow(0.0008,dt));
+      c.py += (ty-c.py)*(1-Math.pow(0.0008,dt));
+
+      drawChar(c, cx, cy, eyeR, openNow, near, dirx, speed>PET_SPEED&&overTop);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function drawChar(c, cx, cy, eyeR, open, near, dirx, petting){
+    // ボディ
+    const bg = ctx.createRadialGradient(cx-c.r*0.3, cy-c.r*0.35, c.r*0.2, cx, cy, c.r);
+    bg.addColorStop(0, lighten(c.body, 0.18));
+    bg.addColorStop(1, c.body);
+    ctx.beginPath(); ctx.arc(cx,cy,c.r,0,Math.PI*2);
+    ctx.fillStyle=bg; ctx.shadowColor=COL.shadow; ctx.shadowBlur=18; ctx.shadowOffsetY=8;
+    ctx.fill(); ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+
+    // ほっぺ（驚いてる時に薄く）
+    if (near){
+      ctx.globalAlpha = 0.5;
+      for (const s of [-1,1]){
+        ctx.beginPath(); ctx.ellipse(cx+s*c.r*0.5, cy+c.r*0.16, c.r*0.14, c.r*0.1, 0,0,Math.PI*2);
+        ctx.fillStyle="rgba(240,168,189,.6)"; ctx.fill();
+      }
+      ctx.globalAlpha=1;
+    }
+
+    // 目（左右）
+    const eyeDX = c.r*0.34, eyeDY = -c.r*0.06;
+    for (const s of [-1,1]){
+      const ex=cx+s*eyeDX, ey=cy+eyeDY;
+      // 目の輪郭（開き open で縦につぶす）。まぶたは上下から。
+      ctx.save();
+      ctx.translate(ex,ey);
+      const ry = eyeR*Math.min(1.4, open);
+      ctx.beginPath(); ctx.ellipse(0,0, eyeR, ry, 0, 0, Math.PI*2);
+      ctx.fillStyle=COL.eyeW; ctx.fill();
+      ctx.lineWidth=Math.max(1,eyeR*0.08); ctx.strokeStyle="rgba(40,35,25,.12)"; ctx.stroke();
+      // 瞳（クリップして目からはみ出さない）
+      ctx.clip();
+      const pr = eyeR*0.55;
+      ctx.beginPath(); ctx.arc(c.px, c.py, pr, 0, Math.PI*2);
+      ctx.fillStyle=c.ink; ctx.fill();
+      // ハイライト
+      ctx.beginPath(); ctx.arc(c.px-pr*0.35, c.py-pr*0.4, pr*0.32, 0, Math.PI*2);
+      ctx.fillStyle="rgba(255,255,255,.85)"; ctx.fill();
+      ctx.restore();
+
+      // 細める/撫でられ時のまぶた（上から弧をかぶせる）
+      if (open < 0.7){
+        const lid = 1-open/0.7;
+        ctx.beginPath();
+        ctx.ellipse(ex, ey - ry + ry*2*(1-lid*0.9), eyeR*1.05, ry*1.05, 0, 0, Math.PI*2);
+        ctx.fillStyle=lighten(c.body,0.06);
+        ctx.save(); ctx.beginPath(); ctx.rect(ex-eyeR*1.2, ey-eyeR*1.6, eyeR*2.4, ry*(1-open)); ctx.clip();
+        ctx.restore();
+      }
+    }
+
+    // 撫でられているときの弧まぶた（両目を細く：上下から半月）
+    if (open < 0.5){
+      for (const s of [-1,1]){
+        const ex=cx+s*eyeDX, ey=cy+eyeDY;
+        ctx.beginPath();
+        ctx.arc(ex, ey, eyeR*1.02, Math.PI*0.08, Math.PI-0.08);
+        ctx.lineWidth=eyeR*0.16; ctx.lineCap="round"; ctx.strokeStyle=c.ink; ctx.globalAlpha=0.5; ctx.stroke(); ctx.globalAlpha=1;
+      }
+    }
+
+    // 驚きの口（小さな o）／通常は微笑
+    ctx.beginPath();
+    if (near){
+      ctx.arc(cx, cy+c.r*0.42, c.r*0.09, 0, Math.PI*2);
+      ctx.fillStyle=c.ink; ctx.globalAlpha=0.7; ctx.fill(); ctx.globalAlpha=1;
+    } else {
+      ctx.arc(cx, cy+c.r*0.32, c.r*0.16, Math.PI*0.15, Math.PI*0.85);
+      ctx.lineWidth=Math.max(1.4,c.r*0.045); ctx.lineCap="round"; ctx.strokeStyle=c.ink; ctx.globalAlpha=0.55; ctx.stroke(); ctx.globalAlpha=1;
+    }
+  }
+
+  function lighten(hex, amt){
+    let h=hex.replace('#',''); if(h.length===3)h=h.split('').map(c=>c+c).join('');
+    const n=parseInt(h,16); let r=(n>>16)&255,g=(n>>8)&255,b=n&255;
+    r=Math.min(255,r+(255-r)*amt); g=Math.min(255,g+(255-g)*amt); b=Math.min(255,b+(255-b)*amt);
+    return "rgb("+(r|0)+","+(g|0)+","+(b|0)+")";
+  }
+
+  requestAnimationFrame(frame);
+  new MutationObserver(readColors).observe(root, { attributes:true, attributeFilter:["data-theme","data-appearance"] });
+})();
+</script>
+</body>
+</html>

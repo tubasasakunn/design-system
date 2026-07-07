@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="降り積もる雪">
+<meta name="pattern-desc" content="深度別レイヤーの雪が風に流されて降り、地面と丘のシルエットに高さマップとして積もっていく。">
+<title>降り積もる雪</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-secondary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    font-size: .8rem; color: var(--color-fg-muted); letter-spacing: .04em;
+    background: color-mix(in srgb, var(--color-bg-elevated) 65%, transparent);
+    padding: .5rem 1rem; border-radius: 999px; pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">ポインタで風向きが変わる / 押すと積雪を払う</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h=h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c);
+  const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const mix = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const rgba = (c,a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+const C = {};
+const refresh = () => {
+  C.bg  = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.bg2 = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.snow = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.muted = hexRgb(token("--color-fg-muted", "#a79f91"));
+  C.hill = mix(C.ink, C.bg, 0.55);
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+let W=0, H=0, dpr=1, groundY;
+let terrain, snowH, cols, cw;
+const resize = () => {
+  dpr=Math.min(2, window.devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0);
+  buildTerrain();
+};
+addEventListener("resize", resize);
+
+const rmq = matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches; rmq.addEventListener?.("change", e => reduced = e.matches);
+
+const rand = (a,b) => a + Math.random()*(b-a);
+
+// 高さマップ: 列ごとに地形の頂上 y (terrain) と そこに積もった雪の厚み(snowH)
+function buildTerrain() {
+  cw = 3;                              // 1列の幅(px)
+  cols = Math.ceil(W / cw) + 1;
+  groundY = H * 0.82;
+  terrain = new Float32Array(cols);
+  snowH = new Float32Array(cols);      // 積雪の高さ
+  // なだらかな丘を数個の正弦で合成
+  const s1=rand(0,6.28), s2=rand(0,6.28), s3=rand(0,6.28);
+  for (let i=0;i<cols;i++){
+    const x = i/cols;
+    const hill = Math.sin(x*6.28*1.2 + s1)*22
+               + Math.sin(x*6.28*2.7 + s2)*11
+               + Math.sin(x*6.28*0.6 + s3)*30;
+    terrain[i] = groundY - hill;
+  }
+}
+
+// 深度レイヤーの雪。z: 0(遠く小さく遅い)〜1(手前 大きく速い)
+const flakes = [];
+const COUNT = Math.min(520, Math.round(W*H/2600));
+function spawn(top) {
+  const z = Math.random();
+  return {
+    x: rand(-20, W+20),
+    y: top ? rand(-40, -2) : rand(-40, H),
+    z, r: 0.8 + z*2.6,
+    fall: 22 + z*46,
+    phase: rand(0,6.28), sw: rand(0.5,1.4), amp: rand(6, 20),
+    settled: false,
+  };
+}
+for (let i=0;i<COUNT;i++) flakes.push(spawn(false));
+
+let wind = 0, windTarget = 8;
+let pointer = { x: W/2, y: H/2, down: false };
+function onMove(e){ const r=canvas.getBoundingClientRect(); pointer.x=e.clientX-r.left; pointer.y=e.clientY-r.top;
+  windTarget = ((pointer.x/W) - 0.5) * 90; }
+addEventListener("pointermove", onMove);
+addEventListener("pointerdown", (e)=>{ onMove(e); pointer.down=true; });
+addEventListener("pointerup", ()=>pointer.down=false);
+addEventListener("pointerleave", ()=>pointer.down=false);
+
+resize();
+
+// 積雪高さマップの表面 y を返す
+const surfaceY = (col) => terrain[col] - snowH[col];
+
+let last = performance.now();
+function frame(now) {
+  let dt = (now-last)/1000; last = now; if (dt>0.05) dt=0.05;
+
+  wind += (windTarget - wind) * Math.min(1, dt*1.5);
+  const effWind = reduced ? 0 : wind;
+
+  // 積雪をならす（拡散）: 隣と平均化して自然な稜線に
+  if (!reduced) {
+    for (let pass=0; pass<1; pass++){
+      for (let i=1;i<cols-1;i++){
+        const avg = (snowH[i-1] + snowH[i+1]) * 0.5;
+        // 高すぎる差はなだれ
+        const diff = snowH[i] - avg;
+        if (Math.abs(diff) > 2) snowH[i] -= diff * 0.15 * dt * 60 * 0.05;
+      }
+    }
+    // ポインタで押すと積雪を払う
+    if (pointer.down) {
+      const ci = Math.round(pointer.x/cw);
+      for (let k=-14;k<=14;k++){ const i=ci+k; if(i>=0&&i<cols){
+        const f = 1 - Math.abs(k)/16; snowH[i] = Math.max(0, snowH[i] - f*80*dt);
+      }}
+    }
+  }
+
+  // 背景（雪雲の空）
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, rgba(mix(C.bg2, C.muted, 0.10), 1));
+  g.addColorStop(1, rgba(C.bg, 1));
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+  // 遠景の雪（奥レイヤー、先に描く）と手前で分けて描く
+  for (const f of flakes) {
+    if (!f.settled) {
+      if (!reduced) {
+        f.phase += f.sw*dt;
+        f.x += (effWind*(0.3+f.z) + Math.sin(f.phase)*f.amp) * dt;
+        f.y += f.fall * dt;
+      }
+      // ラップ
+      if (f.x < -30) f.x = W+30; if (f.x > W+30) f.x = -30;
+      // 着地判定: 対応列の表面に達したら積もる
+      const ci = Math.max(0, Math.min(cols-1, Math.round(f.x/cw)));
+      const sy = surfaceY(ci);
+      if (f.y >= sy) {
+        // 積雪高さマップに加算（手前ほど厚い粒）
+        const add = 0.5 + f.z*1.2;
+        snowH[ci] += add;
+        if (ci>0) snowH[ci-1] += add*0.4;
+        if (ci<cols-1) snowH[ci+1] += add*0.4;
+        Object.assign(f, spawn(true)); // 再投入
+        continue;
+      }
+    }
+    const alpha = 0.5 + f.z*0.45;
+    ctx.fillStyle = rgba(C.snow, alpha);
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 6.2832); ctx.fill();
+  }
+
+  // 地面＋積雪の断面を高さマップから描画
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(0, surfaceY(0));
+  for (let i=0;i<cols;i++) ctx.lineTo(i*cw, surfaceY(i));
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  const sg = ctx.createLinearGradient(0, groundY-120, 0, H);
+  sg.addColorStop(0, rgba(C.snow, 1));
+  sg.addColorStop(1, rgba(mix(C.snow, C.muted, 0.22), 1));
+  ctx.fillStyle = sg; ctx.fill();
+
+  // 地形本体（雪の下の土/丘）薄く
+  ctx.beginPath();
+  ctx.moveTo(0, H); ctx.lineTo(0, terrain[0]);
+  for (let i=0;i<cols;i++) ctx.lineTo(i*cw, terrain[i]);
+  ctx.lineTo(W, H); ctx.closePath();
+  ctx.fillStyle = rgba(C.hill, 0.10); ctx.fill();
+
+  // 積雪の稜線ハイライト
+  ctx.beginPath();
+  ctx.moveTo(0, surfaceY(0));
+  for (let i=1;i<cols;i++) ctx.lineTo(i*cw, surfaceY(i));
+  ctx.strokeStyle = rgba(mix(C.snow,[255,255,255],0.5), 0.7);
+  ctx.lineWidth = 1.5; ctx.stroke();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

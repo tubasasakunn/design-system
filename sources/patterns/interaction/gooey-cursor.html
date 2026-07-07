@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>にゅるカーソル</title>
+<meta name="pattern-title" content="にゅるカーソル">
+<meta name="pattern-desc" content="遅延追従する複数円のメタボールカーソル。ボタンに吸い付き枠に沿って広がる、SVGグーイフィルタ。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    cursor: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  .panel { text-align: center; padding: 24px; max-width: 520px; }
+  .panel h1 { font-size: clamp(22px, 4vw, 32px); font-weight: 600; margin: 0 0 8px; letter-spacing: .03em; }
+  .panel p { margin: 0 0 30px; color: var(--color-fg-muted); font-size: 14px; line-height: 1.7; }
+  .targets { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; }
+  .t {
+    position: relative;
+    padding: 14px 24px;
+    border-radius: 16px;
+    font-size: 15px; font-weight: 500;
+    color: var(--color-fg-primary);
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    text-decoration: none;
+    cursor: none;
+    transition: color .2s ease, transform .25s cubic-bezier(.2,.8,.2,1);
+  }
+  .t.pill { border-radius: 999px; }
+  .t.hovered { color: var(--color-accent-fg); transform: translateY(-2px); }
+  /* グーイ層：メタボール本体。フィルタで近接する円が融合する */
+  #goo {
+    position: fixed; inset: 0; z-index: 40;
+    pointer-events: none;
+    filter: url(#goo-filter);
+  }
+  .blob {
+    position: absolute; top: 0; left: 0;
+    border-radius: 50%;
+    background: var(--color-accent-default);
+    will-change: transform;
+  }
+  .hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    margin: 0; font-size: 13px; color: var(--color-fg-muted);
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    padding: 7px 15px; border-radius: 999px; border: 1px solid var(--color-border-default);
+    pointer-events: none; z-index: 60;
+  }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h1>にゅるカーソル</h1>
+    <p>カーソルの後ろに柔らかい玉が連なって追ってきます。<br>下のボタンに近づくと吸い付いて、枠に沿って広がります。</p>
+    <div class="targets">
+      <a href="#" class="t pill" data-t>はじめる</a>
+      <a href="#" class="t" data-t>ギャラリー</a>
+      <a href="#" class="t pill" data-t>設定</a>
+      <a href="#" class="t" data-t>About</a>
+    </div>
+  </div>
+
+  <div id="goo" aria-hidden="true"></div>
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <filter id="goo-filter">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="blur"/>
+        <feColorMatrix in="blur" mode="matrix"
+          values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -9" result="goo"/>
+        <feComposite in="SourceGraphic" in2="goo" operator="atop"/>
+      </filter>
+    </defs>
+  </svg>
+
+  <p class="hint">ボタンに近づけてみてください</p>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const goo = document.getElementById("goo");
+  const targets = [...document.querySelectorAll("[data-t]")];
+
+  // 数珠状に遅延追従する玉。先頭ほど大きく速い。
+  const N = 7;
+  const blobs = [];
+  for (let i = 0; i < N; i++) {
+    const t = i / (N - 1);
+    const size = 26 - t * 14;            // 26 → 12px
+    const el = document.createElement("div");
+    el.className = "blob";
+    el.style.width = size + "px";
+    el.style.height = size + "px";
+    goo.appendChild(el);
+    blobs.push({
+      el, size,
+      x: innerWidth / 2, y: innerHeight / 2,
+      vx: 0, vy: 0,
+      k: 340 - i * 30,                   // 後ろほど柔らかい
+    });
+  }
+
+  const pointer = { x: innerWidth / 2, y: innerHeight / 2 };
+  let hasPointer = false;
+  addEventListener("pointermove", (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY; hasPointer = true;
+  }, { passive: true });
+  addEventListener("pointerdown", (e) => {
+    pointer.x = e.clientX; pointer.y = e.clientY; hasPointer = true;
+  }, { passive: true });
+
+  // ---- 吸着（ボタン枠に沿って広がる）----
+  let stick = null;  // { rect, radius }
+  function evalStick() {
+    if (!hasPointer) { setHover(null); return; }
+    let best = null, bestD = 70;   // 吸着レンジ(px)
+    for (const t of targets) {
+      const r = t.getBoundingClientRect();
+      const cx = Math.max(r.left, Math.min(pointer.x, r.right));
+      const cy = Math.max(r.top, Math.min(pointer.y, r.bottom));
+      const d = Math.hypot(pointer.x - cx, pointer.y - cy);
+      if (d < bestD) { bestD = d; best = { el: t, r }; }
+    }
+    setHover(best);
+  }
+  let hoveredEl = null;
+  function setHover(best) {
+    const el = best?.el || null;
+    if (el !== hoveredEl) {
+      hoveredEl?.classList.remove("hovered");
+      el?.classList.add("hovered");
+      hoveredEl = el;
+    }
+    stick = best ? { r: best.r } : null;
+  }
+
+  // 吸着時：各玉を枠の周囲へ配置（角丸矩形の外周を等分）
+  function perimeterPoint(r, frac) {
+    const pad = 6;
+    const x0 = r.left - pad, y0 = r.top - pad;
+    const w = r.width + pad * 2, h = r.height + pad * 2;
+    const rad = Math.min(h / 2, 16);
+    // 直線部の合計長で近似分配（角も直線として扱う簡易版）
+    const per = 2 * (w + h);
+    let s = (frac % 1) * per;
+    if (s < w) return [x0 + s, y0];
+    s -= w;
+    if (s < h) return [x0 + w, y0 + s];
+    s -= h;
+    if (s < w) return [x0 + w - s, y0 + h];
+    s -= w;
+    return [x0, y0 + h - s];
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    for (let i = 0; i < N; i++) {
+      const b = blobs[i];
+      let tx, ty, tsize = b.size;
+      if (stick) {
+        // 玉を枠外周へ割り当てて「沿って広がる」。先頭は中央寄りで芯を作る。
+        if (i === 0) {
+          tx = stick.r.left + stick.r.width / 2;
+          ty = stick.r.top + stick.r.height / 2;
+          tsize = Math.max(stick.r.height * 0.9, 24);
+        } else {
+          const [px, py] = perimeterPoint(stick.r, (i - 1) / (N - 1));
+          tx = px; ty = py;
+        }
+      } else {
+        // 先頭はポインタ、後続は前の玉を追う（数珠繋ぎ）
+        if (i === 0) { tx = pointer.x; ty = pointer.y; }
+        else { tx = blobs[i - 1].x; ty = blobs[i - 1].y; }
+      }
+
+      if (reduce) { b.x = tx; b.y = ty; b.vx = b.vy = 0; }
+      else {
+        const D = 2 * Math.sqrt(b.k);   // 臨界減衰
+        b.vx += (b.k * (tx - b.x) - D * b.vx) * dt;
+        b.vy += (b.k * (ty - b.y) - D * b.vy) * dt;
+        b.x += b.vx * dt; b.y += b.vy * dt;
+      }
+
+      // サイズ補間（吸着時に芯が膨らむ）
+      const cur = parseFloat(b.el.style.width);
+      const ns = cur + (tsize - cur) * Math.min(1, dt * 10);
+      b.el.style.width = ns + "px";
+      b.el.style.height = ns + "px";
+      b.el.style.transform =
+        "translate3d(" + (b.x - ns / 2).toFixed(2) + "px," + (b.y - ns / 2).toFixed(2) + "px,0)";
+    }
+
+    evalStick();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  addEventListener("pointerleave", () => { hasPointer = false; setHover(null); });
+  // 色は CSS 変数で追従。属性変化を監視（仕様準拠）。
+  new MutationObserver(() => {}).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+})();
+</script>
+</body>
+</html>

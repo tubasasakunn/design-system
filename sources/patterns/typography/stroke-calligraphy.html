@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>一筆書きの題字</title>
+<meta name="pattern-title" content="一筆書きの題字">
+<meta name="pattern-desc" content="筆圧のある太細を持つ筆画が、書き順どおりに時差をつけて描かれていく題字。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(120% 90% at 50% 12%, color-mix(in srgb, var(--color-bg-elevated) 60%, transparent), transparent 70%),
+      var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    height: 100dvh;
+  }
+  #wrap { display: flex; flex-direction: column; align-items: center; gap: 1.4rem; }
+  #paper {
+    width: min(78vw, 460px);
+    aspect-ratio: 7 / 6;
+    border-radius: 24px;
+    background: color-mix(in srgb, var(--color-bg-secondary) 60%, var(--color-bg-primary));
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 18px 44px -28px rgba(40,35,25,.5), inset 0 0 0 1px color-mix(in srgb, var(--color-bg-elevated) 40%, transparent);
+    display: grid; place-items: center;
+  }
+  #paper svg { width: 88%; height: 88%; overflow: visible; }
+  .brush { fill: var(--color-fg-primary); }
+  .seal {
+    fill: color-mix(in srgb, var(--color-status-error) 78%, var(--color-fg-primary));
+    opacity: 0;
+    transition: opacity .5s ease;
+  }
+  #caption { font-size: .82rem; letter-spacing: .16em; color: var(--color-fg-muted); }
+  #replay {
+    padding: .5rem 1.2rem; border-radius: 999px; font: inherit; font-size: .82rem;
+    cursor: pointer; color: var(--color-accent-fg);
+    background: var(--color-accent-default);
+    border: 1px solid color-mix(in srgb, var(--color-accent-hover) 60%, transparent);
+    box-shadow: 0 6px 16px -8px var(--color-accent-default);
+    transition: transform .18s ease, background .18s ease;
+  }
+  #replay:hover { background: var(--color-accent-hover); }
+  #replay:active { transform: scale(.95); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="paper"><svg id="art" viewBox="0 0 420 360" aria-label="筆で描かれた題字"></svg></div>
+  <div id="caption">こ こ ろ を 一 筆 で</div>
+  <button id="replay" type="button">もう一度 描く</button>
+</div>
+<script>
+(() => {
+  "use strict";
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("art");
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // ---- 筆画の定義（centerline の節点と筆圧プロファイル）----
+  // 「心」に寄せた 4 画。profile: brush=両端細く中央太い / dab=打ち込み太く払い細い。
+  const STROKES = [
+    { name: "左点", knots: [[128,140],[116,158],[120,182],[132,196]], maxHW: 11, profile: "dab" },
+    { name: "臥鉤", knots: [[150,150],[133,214],[160,276],[224,300],[300,282],[338,222],[322,196]], maxHW: 17, profile: "brush" },
+    { name: "中点", knots: [[212,176],[224,192],[228,210]], maxHW: 10, profile: "dab" },
+    { name: "右点", knots: [[286,138],[306,156],[306,182]], maxHW: 10, profile: "dab" },
+  ];
+
+  const env = {
+    brush: (t) => Math.pow(Math.sin(Math.PI * t), 0.62) * (0.55 + 0.45 * Math.min(1, t * 5)),
+    dab:   (t) => Math.pow(1 - t, 0.55) * Math.min(1, t * 7 + 0.05),
+  };
+
+  // Catmull-Rom で節点を滑らかに補間してサンプル点を得る
+  function sampleSpline(knots, per = 22) {
+    const p = knots;
+    const n = p.length;
+    if (n < 2) return knots.map((k) => ({ x: k[0], y: k[1] }));
+    const out = [];
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p[i + 1];
+      for (let s = 0; s < per; s++) {
+        const t = s / per, t2 = t * t, t3 = t2 * t;
+        const x = 0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3);
+        const y = 0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3);
+        out.push({ x, y });
+      }
+    }
+    out.push({ x: p[n-1][0], y: p[n-1][1] });
+    return out;
+  }
+
+  // サンプル点と筆圧から、太細のある筆画の塗り輪郭 d を組む
+  function outline(pts, maxHW, profileFn) {
+    const n = pts.length;
+    const half = pts.map((_, i) => Math.max(0.6, maxHW * profileFn(i / (n - 1))));
+    const L = [], R = [];
+    for (let i = 0; i < n; i++) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+      let tx = b.x - a.x, ty = b.y - a.y;
+      const len = Math.hypot(tx, ty) || 1; tx /= len; ty /= len;
+      const nx = -ty, ny = tx;
+      L.push([pts[i].x + nx * half[i], pts[i].y + ny * half[i]]);
+      R.push([pts[i].x - nx * half[i], pts[i].y - ny * half[i]]);
+    }
+    let d = "M" + L[0][0].toFixed(2) + "," + L[0][1].toFixed(2);
+    for (let i = 1; i < n; i++) d += "L" + L[i][0].toFixed(2) + "," + L[i][1].toFixed(2);
+    for (let i = n - 1; i >= 0; i--) d += "L" + R[i][0].toFixed(2) + "," + R[i][1].toFixed(2);
+    return d + "Z";
+  }
+
+  function centerlineD(pts) {
+    return "M" + pts.map((p) => p.x.toFixed(2) + "," + p.y.toFixed(2)).join("L");
+  }
+
+  // ---- SVG を組み立て（マスクの太い線を成長させて筆画を「引かれていく」表現に）----
+  const built = [];
+  const defs = document.createElementNS(NS, "defs");
+  svg.appendChild(defs);
+
+  STROKES.forEach((st, i) => {
+    const pts = sampleSpline(st.knots);
+    const mask = document.createElementNS(NS, "mask");
+    mask.setAttribute("id", "reveal-" + i);
+    mask.setAttribute("maskUnits", "userSpaceOnUse");
+    const rvl = document.createElementNS(NS, "path");
+    rvl.setAttribute("d", centerlineD(pts));
+    rvl.setAttribute("fill", "none");
+    rvl.setAttribute("stroke", "#fff");
+    rvl.setAttribute("stroke-width", String(st.maxHW * 2 + 8));
+    rvl.setAttribute("stroke-linecap", "round");
+    rvl.setAttribute("stroke-linejoin", "round");
+    mask.appendChild(rvl);
+    defs.appendChild(mask);
+
+    const brush = document.createElementNS(NS, "path");
+    brush.setAttribute("class", "brush");
+    brush.setAttribute("d", outline(pts, st.maxHW, env[st.profile]));
+    brush.setAttribute("mask", "url(#reveal-" + i + ")");
+    svg.appendChild(brush);
+
+    const total = rvl.getTotalLength();
+    rvl.style.strokeDasharray = total;
+    rvl.style.strokeDashoffset = total;
+    built.push({ rvl, total, dur: Math.max(0.5, total / 620) });
+  });
+
+  // 落款（印）
+  const seal = document.createElementNS(NS, "rect");
+  seal.setAttribute("class", "seal");
+  seal.setAttribute("x", "352"); seal.setAttribute("y", "292");
+  seal.setAttribute("width", "34"); seal.setAttribute("height", "34");
+  seal.setAttribute("rx", "6");
+  svg.appendChild(seal);
+
+  // ---- タイムライン（書き順の時差）----
+  const GAP = 0.14;
+  let starts = [];
+  (function computeStarts() {
+    let t = 0.15;
+    starts = built.map((b) => { const s = t; t += b.dur * 0.78 + GAP; return s; });
+  })();
+
+  const easeInOut = (t) => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3) / 2;
+  let startTime = 0, raf = 0;
+
+  function reset() {
+    for (const b of built) b.rvl.style.strokeDashoffset = b.total;
+    seal.style.opacity = "0";
+  }
+  function finishInstant() {
+    for (const b of built) b.rvl.style.strokeDashoffset = 0;
+    seal.style.opacity = "1";
+  }
+
+  function frame(now) {
+    const el = (now - startTime) / 1000;
+    let done = true;
+    for (let i = 0; i < built.length; i++) {
+      const b = built[i];
+      const local = el - starts[i];
+      let p = local <= 0 ? 0 : local >= b.dur ? 1 : local / b.dur;
+      if (p < 1) done = false;
+      b.rvl.style.strokeDashoffset = b.total * (1 - easeInOut(p));
+    }
+    const last = starts[starts.length - 1] + built[built.length - 1].dur;
+    if (el > last + 0.15) seal.style.opacity = "1";
+    if (done && el > last + 0.6) return;
+    raf = requestAnimationFrame(frame);
+  }
+
+  function play() {
+    cancelAnimationFrame(raf);
+    if (reduce.matches) { finishInstant(); return; }
+    reset();
+    startTime = performance.now();
+    raf = requestAnimationFrame(frame);
+  }
+
+  document.getElementById("replay").addEventListener("click", play);
+  reduce.addEventListener?.("change", () => { if (reduce.matches) { cancelAnimationFrame(raf); finishInstant(); } });
+  play();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ゼリーボタン">
+<meta name="pattern-desc" content="押すと減衰振動のばね物理で scale と skew がぷるんと波打つボタン群。連打すると揺れが重なる。">
+<title>ゼリーボタン</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    display: grid; place-items: center;
+  }
+  .stage {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 26px;
+    padding: 24px;
+    width: min(560px, 90vw);
+  }
+  .jelly {
+    position: relative;
+    border: none;
+    border-radius: 22px;
+    padding: 26px 20px;
+    font: inherit;
+    font-size: 1.02rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: var(--color-accent-fg);
+    background: var(--color-accent-default);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    will-change: transform;
+    transform-origin: center bottom;
+    box-shadow: 0 10px 24px -12px color-mix(in srgb, var(--color-accent-default) 60%, transparent);
+    isolation: isolate;
+    overflow: hidden;
+  }
+  .jelly.alt { background: var(--color-bg-elevated); color: var(--color-fg-primary); border: 1px solid var(--color-border-default); box-shadow: 0 8px 20px -14px var(--color-fg-primary); }
+  .jelly span { position: relative; z-index: 2; display: block; will-change: transform; }
+  .jelly .ring {
+    position: absolute; z-index: 1; left: 50%; top: 50%;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: color-mix(in srgb, var(--color-accent-fg) 22%, transparent);
+    transform: translate(-50%, -50%) scale(0);
+    pointer-events: none;
+  }
+  .jelly.alt .ring { background: color-mix(in srgb, var(--color-accent-default) 30%, transparent); }
+  .hint {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .hint h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .hint p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <button class="jelly"><span>ぷるん</span></button>
+  <button class="jelly alt"><span>もちもち</span></button>
+  <button class="jelly alt"><span>ぽよん</span></button>
+  <button class="jelly"><span>ふるふる</span></button>
+  <button class="jelly"><span>たぷたぷ</span></button>
+  <button class="jelly alt"><span>ぷにぷに</span></button>
+</div>
+<div class="hint">
+  <h1>ゼリーボタン</h1>
+  <p>押すとばね（減衰振動）で揺れます。連打すると揺れが重なって、いつまでもぷるぷる。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const buttons = [...document.querySelectorAll(".jelly")];
+
+  // ---- 減衰振動ばね（1 自由度）: acc = -k x - c v ----
+  // s: 変位（正=押し込み量）, v: 速度。目標は 0（自然形）。
+  const K = 260;      // 剛性
+  const C = 12.5;     // 減衰
+  const state = buttons.map((el) => ({
+    el, label: el.querySelector("span"), ring: null,
+    s: 0, v: 0, ripple: 0, rv: 0,
+  }));
+
+  function press(st, e) {
+    // 速度にインパルスを与える → 押し込まれてから跳ね返り、行き過ぎて振動
+    st.v += 26;               // 連打で加算 → 揺れが重なる
+    st.rv += 30;              // 二次のさざ波
+    // 押した位置に波紋
+    const r = st.el.getBoundingClientRect();
+    const ring = document.createElement("i");
+    ring.className = "ring";
+    const px = ((e.clientX ?? r.left + r.width / 2) - r.left);
+    const py = ((e.clientY ?? r.top + r.height / 2) - r.top);
+    ring.style.left = px + "px"; ring.style.top = py + "px";
+    st.el.appendChild(ring);
+    const t0 = performance.now();
+    (function grow(now) {
+      const k = Math.min((now - t0) / 520, 1);
+      const e2 = 1 - Math.pow(1 - k, 3);
+      ring.style.transform = `translate(-50%,-50%) scale(${e2 * 16})`;
+      ring.style.opacity = String(1 - k);
+      if (k < 1) requestAnimationFrame(grow); else ring.remove();
+    })(t0);
+  }
+
+  for (const st of state) {
+    st.el.addEventListener("pointerdown", (e) => { st.el.setPointerCapture?.(e.pointerId); press(st, e); });
+  }
+
+  // ---- 更新ループ ----
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    for (const st of state) {
+      if (rm.matches) { st.s = 0; st.v = 0; st.ripple = 0; st.rv = 0; }
+      else {
+        // 主ばね
+        let a = -K * st.s - C * st.v;
+        st.v += a * dt; st.s += st.v * dt;
+        // 二次ばね（少し速い・強い減衰）: 表面のさざ波
+        let a2 = -K * 2.4 * st.ripple - C * 1.4 * st.rv;
+        st.rv += a2 * dt; st.ripple += st.rv * dt;
+      }
+      // s を scale / skew に写像（体積保存っぽく X と Y を逆に）
+      const sq = st.s * 0.012;            // 押し込みで縦つぶれ
+      const wob = st.ripple * 0.006;
+      const scaleY = 1 - sq + wob;
+      const scaleX = 1 + sq * 0.85 - wob * 0.7;
+      const skew = st.ripple * 0.14;      // 横ゆれ
+      st.el.style.transform = `scale(${scaleX.toFixed(4)}, ${scaleY.toFixed(4)}) skewX(${skew.toFixed(3)}deg)`;
+      // 中のラベルは逆位相で少し戻す（ぷるん感）
+      st.label.style.transform = `translateY(${(-st.s * 0.06).toFixed(2)}px) scale(${(1 + sq * 0.4).toFixed(3)})`;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+
+  // 開いた瞬間に軽く弾ませて存在を知らせる
+  if (!rm.matches) state.forEach((st, i) => setTimeout(() => { st.v += 14; st.rv += 16; }, 120 + i * 90));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="奥行きギャラリー">
+<meta name="pattern-desc" content="z 軸に連なるカードのトンネルをホイールとドラッグで進む。近づく一枚は拡大して通り過ぎ、遠くは霞の中に眠る。">
+<title>奥行きギャラリー</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    touch-action: none;
+    user-select: none; -webkit-user-select: none;
+    overscroll-behavior: none;
+  }
+  .tunnel {
+    position: fixed; inset: 0;
+    perspective: 900px;
+    perspective-origin: 50% 46%;
+    overflow: hidden;
+  }
+  .space { position: absolute; inset: 0; transform-style: preserve-3d; }
+  .card {
+    position: absolute; left: 50%; top: 46%;
+    width: min(340px, 64vw); height: 220px;
+    border-radius: 22px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 24px 60px -24px rgba(40, 35, 25, .3);
+    padding: 22px 24px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+  }
+  .card .bar { width: 46px; height: 8px; border-radius: 4px; background: var(--tint); }
+  .card .no {
+    position: absolute; right: 22px; top: 16px;
+    font-size: 2rem; font-weight: 200; color: var(--color-border-strong);
+    font-variant-numeric: tabular-nums;
+  }
+  .card h2 { font-size: 1.5rem; font-weight: 650; letter-spacing: .1em; }
+  .card .en { font-size: .68rem; letter-spacing: .28em; color: var(--color-fg-muted); margin-top: 4px; }
+  .card p { font-size: .76rem; line-height: 1.8; color: var(--color-fg-secondary); }
+  .card .dotrow { display: flex; gap: 6px; }
+  .card .dotrow i { width: 8px; height: 8px; border-radius: 50%; background: color-mix(in srgb, var(--tint) 55%, transparent); }
+
+  /* 通過時にきらめく縁 */
+  .card::after {
+    content: ""; position: absolute; inset: -1px; border-radius: 22px;
+    border: 1.5px solid color-mix(in srgb, var(--tint) 70%, transparent);
+    opacity: var(--pass, 0); pointer-events: none;
+  }
+
+  /* 奥へ吸い込まれる霞（画面中央に向かうビネット） */
+  .haze {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(58% 52% at 50% 46%,
+      color-mix(in srgb, var(--color-bg-primary) 0%, transparent),
+      color-mix(in srgb, var(--color-bg-primary) 6%, transparent) 55%,
+      color-mix(in srgb, var(--color-bg-primary) 72%, transparent));
+  }
+  .hud {
+    position: fixed; right: 26px; top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    z-index: 5; pointer-events: none;
+  }
+  .hud .count { font-size: .72rem; letter-spacing: .18em; color: var(--color-fg-muted); writing-mode: vertical-rl; }
+  .hud .rail { width: 2px; height: min(30dvh, 240px); border-radius: 1px; background: var(--color-border-default); position: relative; }
+  .hud .rail i {
+    position: absolute; left: 50%; top: 0; width: 8px; height: 26px; border-radius: 4px;
+    background: var(--color-accent-default); transform: translateX(-50%);
+  }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none; z-index: 5;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<div class="tunnel"><div class="space" id="space"></div></div>
+<div class="haze"></div>
+<div class="hud"><div class="rail"><i id="thumb"></i></div><div class="count" id="count"></div></div>
+<div class="caption">
+  <h1>奥行きギャラリー</h1>
+  <p>ホイール／上下ドラッグでトンネルを進みます。手前まで来たカードは、ふわりと拡大して視界を通り過ぎます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const space = document.getElementById("space");
+  const thumb = document.getElementById("thumb");
+  const countEl = document.getElementById("count");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  // ---- 展示内容（日本の情景 × パステル）----
+  const ITEMS = [
+    { t: "波紋",     e: "RIPPLES",   c: "#5bbcb1", d: "雨あがりの池。ひとつの雫が、円をいくつも重ねてゆく。" },
+    { t: "苔庭",     e: "MOSS GARDEN", c: "#a9dcc0", d: "何百年ぶんの緑が、石の輪郭をやわらかく包む。" },
+    { t: "霧の杉林", e: "CEDAR MIST", c: "#9fc8ea", d: "まっすぐな幹の列が、白い奥行きの中へ消えてゆく。" },
+    { t: "月見",     e: "TSUKIMI",   c: "#f1d189", d: "すすきの向こう、欠けはじめの月をただ眺める夜。" },
+    { t: "藍染",     e: "AIZOME",    c: "#bcb2e8", d: "甕の中で呼吸する藍。布は空気に触れて青になる。" },
+    { t: "陶片",     e: "KINTSUGI",  c: "#f3a890", d: "割れ目に金を流し、傷のかたちごと景色にする。" },
+    { t: "石庭",     e: "KARESANSUI", c: "#a79f91", d: "砂紋の海に、島がふたつみっつ。水のない水景。" },
+    { t: "茶の湯",   e: "CHANOYU",   c: "#f0a8bd", d: "湯の音、茶筅の音。一椀のための長い静けさ。" },
+    { t: "風鈴",     e: "FURIN",     c: "#9fc8ea", d: "軒先で鳴るガラスの音が、体感温度を一度下げる。" },
+    { t: "灯籠",     e: "TORO",      c: "#f1d189", d: "夕闇の参道に、点々と続くあかりの遠近法。" },
+    { t: "紅葉狩り", e: "MOMIJIGARI", c: "#f3a890", d: "山が燃えるのを、狩るように見に行く言葉の贅沢。" },
+    { t: "雪見",     e: "YUKIMI",    c: "#9fc8ea", d: "音を吸った世界で、降るものだけが動いている。" },
+  ];
+  const N = ITEMS.length, SP = 540;                 // カード間隔(px, z)
+  const MAX = (N - 1) * SP;
+
+  // トンネル状に散らばる配置（正弦で緩く螺旋）
+  const cards = ITEMS.map((it, i) => {
+    const el = document.createElement("div");
+    el.className = "card";
+    el.style.setProperty("--tint", it.c);
+    el.innerHTML =
+      `<span class="no">${String(i + 1).padStart(2, "0")}</span>` +
+      `<div class="bar"></div>` +
+      `<div><h2>${it.t}</h2><div class="en">${it.e}</div></div>` +
+      `<p>${it.d}</p><div class="dotrow"><i></i><i></i><i></i></div>`;
+    space.appendChild(el);
+    return {
+      el,
+      z: i * SP,
+      x: Math.sin(i * 1.9) * 190,
+      y: Math.cos(i * 1.3) * 95,
+      rot: Math.sin(i * 2.6) * 4,
+    };
+  });
+
+  // ---- カメラ（目標値へ指数追従 = フレームレート非依存の滑らかさ）----
+  let cam = -SP * 0.4, target = 0;
+  const clamp = (v) => Math.max(-SP * 0.5, Math.min(MAX + SP * 0.25, v));
+  const smooth = (a, b, t) => Math.max(0, Math.min(1, (a - b.lo) / (b.hi - b.lo))) ** (t || 1);
+
+  function apply() {
+    const FARV = SP * 5.2;                          // これより奥は霞に沈む
+    let nearest = 0, nd = 1e9;
+    for (const c of cards) {
+      const d = c.z - cam;                          // カメラからの奥行き
+      const ad = Math.abs(d);
+      if (ad < nd) { nd = ad; nearest = cards.indexOf(c); }
+      if (d < -SP * 0.55 || d > FARV) { c.el.style.display = "none"; continue; }
+      c.el.style.display = "";
+      // 通過フェード（手前）と霞フェード（奥）
+      const near = smooth(d, { lo: -SP * 0.5, hi: -40 });
+      const far = 1 - smooth(d, { lo: FARV * 0.45, hi: FARV });
+      const passing = Math.max(0, 1 - Math.abs(d - 40) / 260);   // 目の前を通る瞬間 0→1
+      c.el.style.opacity = (near ** 1.4 * far).toFixed(3);
+      c.el.style.setProperty("--pass", (passing * 0.9).toFixed(3));
+      c.el.style.transform =
+        `translate(-50%,-50%) translate3d(${c.x}px, ${c.y}px, ${-d}px) rotate(${c.rot * far}deg)`;
+      c.el.style.zIndex = String(10000 - Math.round(d));
+    }
+    const idx = Math.max(0, Math.min(N - 1, Math.round(cam / SP)));
+    countEl.textContent = `${String(idx + 1).padStart(2, "0")} / ${N}`;
+    const rail = thumb.parentElement.getBoundingClientRect().height - 26;
+    thumb.style.top = `${Math.max(0, Math.min(1, cam / MAX)) * rail}px`;
+    return nearest;
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.1) dt = 0.1;
+    // reduce では補間を省き即座に追従（動きの余韻を消す）
+    const k = rm.matches ? 1 : 1 - Math.exp(-dt * 6.5);
+    cam += (target - cam) * k;
+    apply();
+    requestAnimationFrame(frame);
+  }
+
+  // ---- 入力: ホイール / 上下ドラッグ（pointer events）----
+  addEventListener("wheel", (e) => {
+    e.preventDefault();
+    target = clamp(target + e.deltaY * 1.35);
+  }, { passive: false });
+
+  let dragging = false, py = 0, vy = 0, lastT = 0;
+  addEventListener("pointerdown", (e) => {
+    dragging = true; py = e.clientY; vy = 0; lastT = performance.now();
+  });
+  addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dy = py - e.clientY; py = e.clientY;
+    const t = performance.now(), dtms = Math.max(1, t - lastT); lastT = t;
+    vy = (dy * 3.0) / (dtms / 1000);
+    target = clamp(target + dy * 3.0);
+  });
+  const release = () => {
+    if (!dragging) return;
+    dragging = false;
+    if (!rm.matches) target = clamp(target + vy * 0.14);   // フリックの余韻
+    vy = 0;
+  };
+  addEventListener("pointerup", release);
+  addEventListener("pointercancel", release);
+  addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "PageDown") target = clamp(Math.round(target / SP) * SP + SP);
+    if (e.key === "ArrowUp" || e.key === "PageUp") target = clamp(Math.round(target / SP) * SP - SP);
+  });
+
+  addEventListener("resize", apply);
+  apply();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

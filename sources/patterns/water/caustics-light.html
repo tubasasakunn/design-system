@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="水底のゆらめき">
+<meta name="pattern-desc" content="時間で流れる値ノイズの稜線を掛け合わせて水中コースティクスを描き、ポインタに光の焦点が寄る。">
+<title>水底のゆらめき</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-secondary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 74%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>水底のゆらめき</h1>
+  <p>水面で屈折した光が水底に描く網目。ポインタを動かすと光の焦点が寄ってきます。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h.slice(0, 6), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  let deepC, lightC;
+  function readColors() {
+    const bg2 = hex(token("--color-bg-secondary", "#f1ece2"));
+    const elevated = hex(token("--color-bg-elevated", "#fffdf9"));
+    const fgP = hex(token("--color-fg-primary", "#2c2a26"));
+    const accent = hex(token("--color-accent-default", "#5bbcb1"));
+    const accentDeep = hex(token("--color-accent-fg", "#07312d"));
+    const lum = (c) => c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114;
+    const bright = lum(elevated) > lum(fgP) ? elevated : fgP; // 外観に応じて明るい極を選ぶ
+    deepC = mix(mix(bg2, accent, 0.22), accentDeep, 0.18);    // 底の砂 × 水の陰
+    lightC = mix(bright, accent, 0.22);                       // 屈折光の網目
+    needsDraw = true;
+  }
+
+  // ---- 値ノイズ（整数ハッシュ + 双線形補間）----
+  function hash2(x, y) {
+    let n = (x | 0) * 374761393 + (y | 0) * 668265263;
+    n = (n ^ (n >>> 13)) | 0;
+    n = Math.imul(n, 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+  }
+  function vnoise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+    const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  }
+
+  // ---- キャンバス / 低解像度バッファ ----
+  const CS = 4;                 // 1 セル = 4 css px
+  let W = 0, H = 0, gw = 0, gh = 0;
+  let off, octx, img, vig;
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    gw = Math.ceil(W / CS) + 1;
+    gh = Math.ceil(H / CS) + 1;
+    off = document.createElement("canvas");
+    off.width = gw; off.height = gh;
+    octx = off.getContext("2d");
+    img = octx.createImageData(gw, gh);
+    const d = img.data;
+    for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    // 周辺減光（水の深さの気配）を先に計算
+    vig = new Float32Array(gw * gh);
+    const cx = gw / 2, cy = gh / 2;
+    const inv = 1 / (cx * cx + cy * cy);
+    for (let y = 0, i = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++, i++) {
+        const q = ((x - cx) * (x - cx) + (y - cy) * (y - cy)) * inv;
+        vig[i] = 1 - 0.38 * q;
+      }
+    }
+    needsDraw = true;
+  }
+
+  // ---- コースティクスの描画 ----
+  // 2 層のノイズの稜線 ridge(n)=1-|2n-1| を掛け合わせ、指数で締めると
+  // 屈折光の焦線（網目）が現れる。時間で各層を別方向に流す。
+  const S1 = 0.055, S2 = 0.11, S3 = 0.021;
+  let px = -1e4, py = -1e4, fx = -1e4, fy = -1e4; // 焦点は遅れて追従
+  function render(t) {
+    const d = img.data;
+    const t1x = t * 0.55, t1y = t * 0.23, t2x = t * 0.38, t2y = t * 0.47, t3 = t * 0.08;
+    const gx = fx / CS, gy = fy / CS;
+    const sig = Math.min(gw, gh) * 0.30;
+    const inv2 = 1 / (2 * sig * sig);
+    const dr = lightC[0] - deepC[0], dg = lightC[1] - deepC[1], db = lightC[2] - deepC[2];
+    for (let y = 0, i = 0, p = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++, i++, p += 4) {
+        // ポインタ方向へ座標を引き寄せる（焦点に光が収束する屈折の近似）
+        const ddx = gx - x, ddy = gy - y;
+        const g = Math.exp(-(ddx * ddx + ddy * ddy) * inv2);
+        const wx = x + ddx * 0.22 * g;
+        const wy = y + ddy * 0.22 * g;
+        // 各層 2 オクターブの値ノイズ → 稜線化。層同士の積で焦線（網目）が立つ
+        let n1 = vnoise(wx * S1 + t1x, wy * S1 + t1y) * 0.78
+               + vnoise(wx * S1 * 2.6 + 37.2 - t1y, wy * S1 * 2.6 + t1x) * 0.22;
+        let n2 = vnoise(wx * S2 - t2x, wy * S2 + t2y) * 0.78
+               + vnoise(wx * S2 * 2.3 + 11.8 + t2y, wy * S2 * 2.3 - t2x) * 0.22;
+        // 等値線 n=0.5 の近傍だけを細く光らせる（焦線 = レベルセットの帯）
+        let a1 = 1 - Math.abs(2 * n1 - 1) - 0.82; a1 = a1 > 0 ? a1 / 0.18 : 0;
+        let a2 = 1 - Math.abs(2 * n2 - 1) - 0.82; a2 = a2 > 0 ? a2 / 0.18 : 0;
+        a1 = a1 * a1 * (3 - 2 * a1);
+        a2 = a2 * a2 * (3 - 2 * a2);
+        let c = a1 * a1 * 0.4 + a2 * a2 * 0.34 + a1 * a2 * 0.9; // 交点は一段明るく
+        // 大きくゆっくり動く明暗（水面のうねりの影）
+        const sw = 0.55 + 0.8 * vnoise(x * S3 + t3, y * S3 - t3);
+        let v = (c * (0.8 + 1.7 * g) + 0.05 * g) * sw * vig[i];
+        if (v > 1) v = 1;
+        d[p]     = deepC[0] + dr * v;
+        d[p + 1] = deepC[1] + dg * v;
+        d[p + 2] = deepC[2] + db * v;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.drawImage(off, 0, 0, gw, gh, 0, 0, gw * CS, gh * CS);
+  }
+
+  // ---- 入力 ----
+  const onPoint = (e) => { px = e.clientX; py = e.clientY; needsDraw = true; };
+  canvas.addEventListener("pointermove", onPoint);
+  canvas.addEventListener("pointerdown", onPoint);
+  canvas.addEventListener("pointerleave", () => { px = -1e4; py = -1e4; needsDraw = true; });
+
+  // ---- メインループ ----
+  let last = performance.now(), t = 0, needsDraw = true;
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;
+    // 焦点はイージングで遅れて着く（上質な追従）
+    const k = 1 - Math.pow(0.002, dt);
+    if (fx < -9000) { fx = px; fy = py; }
+    else { fx += (px - fx) * k; fy += (py - fy) * k; }
+    if (Math.abs(px - fx) + Math.abs(py - fy) > 0.5) needsDraw = true;
+
+    if (!rm.matches) {
+      t += dt;                       // 通常: 光は常に流れる
+      render(t);
+    } else if (needsDraw) {
+      render(t);                     // reduce: 時間停止。操作したときだけ焦点を描き直す
+      needsDraw = false;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+
+  addEventListener("resize", resize);
+  resize();
+  readColors();
+  requestAnimationFrame((t0) => { last = t0; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

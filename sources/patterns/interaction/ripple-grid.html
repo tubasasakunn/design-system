@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>波及するグリッド</title>
+<meta name="pattern-title" content="波及するグリッド">
+<meta name="pattern-desc" content="ドットの格子がホバーで盛り上がり、クリックで波紋状に変位と色が広がって、やがて静けさへ戻る。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100dvh; }
+  .hud { position: fixed; left:0; right:0; bottom:24px; text-align:center; pointer-events:none; }
+  .hud h1 { font-size: clamp(18px,3.6vw,26px); font-weight:600; letter-spacing:.04em; margin:0 0 6px; }
+  .hud p { margin:0; font-size:13px; line-height:1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div class="hud">
+    <h1>波及するグリッド</h1>
+    <p>ドットの上をなぞると盛り上がり、クリック（タップ）で波紋が広がります。</p>
+  </div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+
+  function hexRGB(h){ h=h.replace('#',''); if(h.length===3)h=h.split('').map(c=>c+c).join(''); const n=parseInt(h,16); return [(n>>16)&255,(n>>8)&255,n&255]; }
+  let CBASE=[0,0,0], CACC=[0,0,0];
+  function readColors() {
+    CBASE = hexRGB(token("--color-fg-muted", "#a79f91"));
+    CACC = hexRGB(token("--color-accent-default", "#5bbcb1"));
+  }
+  readColors();
+
+  let W=0,H=0,dpr=1, cols=0, rows=0, gap=0, ox=0, oy=0;
+  const dots = [];   // {x,y, z, vz}  z=盛り上がり量
+  function build() {
+    dpr = Math.min(2, devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight;
+    cv.width = W*dpr; cv.height = H*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    gap = Math.max(30, Math.min(46, Math.round(Math.min(W,H)/16)));
+    cols = Math.floor((W - 20)/gap);
+    rows = Math.floor((H - 20)/gap);
+    ox = (W - (cols-1)*gap)/2;
+    oy = (H - (rows-1)*gap)/2;
+    dots.length = 0;
+    for (let r=0;r<rows;r++) for (let c=0;c<cols;c++)
+      dots.push({ gx: ox+c*gap, gy: oy+r*gap, z:0, vz:0, c, r });
+  }
+  build();
+  addEventListener("resize", build);
+
+  let mx=-1e5, my=-1e5, hovering=false;
+  cv.addEventListener("pointermove", (e)=>{ mx=e.clientX; my=e.clientY; hovering=true; }, {passive:true});
+  cv.addEventListener("pointerleave", ()=>{ hovering=false; });
+
+  const ripples = [];   // {x,y,t}
+  cv.addEventListener("pointerdown", (e)=>{
+    ripples.push({ x:e.clientX, y:e.clientY, t:0 });
+    if (ripples.length > 8) ripples.shift();
+    mx=e.clientX; my=e.clientY; hovering=true;
+  });
+
+  const HOVER_R = 96;      // ホバー影響半径
+  const WAVE_SPEED = 520;  // 波の伝播速度 px/s
+  const WAVELEN = 120;     // 波長 px
+  const K = 2*Math.PI/WAVELEN;
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now-last)/1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    // 波紋の時間進行
+    for (const rp of ripples) rp.t += dt;
+    for (let i=ripples.length-1;i>=0;i--) if (ripples[i].t > 3.2) ripples.splice(i,1);
+
+    ctx.clearRect(0,0,W,H);
+
+    for (const d of dots) {
+      // 目標変位: ホバーの盛り上がり + 波紋
+      let target = 0, colorAmt = 0;
+      if (hovering && !reduce) {
+        const dx = d.gx-mx, dy = d.gy-my, dist = Math.hypot(dx,dy);
+        if (dist < HOVER_R) {
+          const f = Math.cos(dist/HOVER_R * Math.PI/2);  // 中心1→縁0
+          target += f*f*22;
+          colorAmt += f*f;
+        }
+      }
+      for (const rp of ripples) {
+        const dist = Math.hypot(d.gx-rp.x, d.gy-rp.y);
+        const front = rp.t*WAVE_SPEED;                 // 波面の現在位置
+        const phase = front - dist;                    // >0 なら波が到達済み
+        if (phase > 0 && phase < WAVELEN*2.2) {
+          const env = Math.exp(-phase/ (WAVELEN*0.9)) * Math.exp(-rp.t*0.6); // 距離と時間で減衰
+          const disp = Math.sin(K*phase) * 30 * env;
+          target += disp;
+          colorAmt += Math.abs(disp)/30 * 0.9;
+        }
+      }
+      // ばねで滑らかに（クリティカルダンプ気味）
+      if (reduce) { d.z = target; d.vz = 0; }
+      else {
+        const a = 240*(target - d.z) - 26*d.vz;
+        d.vz += a*dt; d.z += d.vz*dt;
+      }
+
+      // 疑似3D: z が大きいほど大きく・明るく・少し上へ
+      const lift = d.z;
+      const scale = 1 + Math.max(-0.5, d.z/26);
+      const rad = Math.max(0.6, 1.7*scale);
+      const cAmt = Math.min(1, colorAmt);
+      const R = CBASE[0] + (CACC[0]-CBASE[0])*cAmt;
+      const G = CBASE[1] + (CACC[1]-CBASE[1])*cAmt;
+      const B = CBASE[2] + (CACC[2]-CBASE[2])*cAmt;
+      const alpha = 0.4 + 0.55*Math.min(1, Math.abs(d.z)/18 + 0.15);
+      const px = d.gx, py = d.gy - lift*0.5;
+      ctx.beginPath(); ctx.arc(px, py, rad, 0, Math.PI*2);
+      ctx.fillStyle = "rgba("+(R|0)+","+(G|0)+","+(B|0)+","+alpha.toFixed(3)+")";
+      ctx.fill();
+      if (cAmt > 0.25) {
+        ctx.beginPath(); ctx.arc(px, py, rad+2.4*cAmt, 0, Math.PI*2);
+        ctx.strokeStyle = "rgba("+(CACC[0]|0)+","+(CACC[1]|0)+","+(CACC[2]|0)+","+(0.25*cAmt).toFixed(3)+")";
+        ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  new MutationObserver(readColors).observe(root, { attributes:true, attributeFilter:["data-theme","data-appearance"] });
+})();
+</script>
+</body>
+</html>

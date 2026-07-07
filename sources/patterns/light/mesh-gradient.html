@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="うごめくメッシュ">
+<meta name="pattern-desc" content="パステルの色点が漂いながら混ざり合う動的メッシュ。薄い粒状ノイズで質感を添える。">
+<title>うごめくメッシュ</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary);
+  }
+  #mesh { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none;
+    image-rendering: auto; }
+  #grain { position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+    pointer-events: none; mix-blend-mode: soft-light; opacity: .5; }
+  .hint {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: .55rem 1.15rem; border-radius: 999px; font-size: .78rem; letter-spacing: .05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 62%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap; text-align: center;
+  }
+</style>
+</head>
+<body>
+<canvas id="mesh"></canvas>
+<canvas id="grain"></canvas>
+<div class="hint">漂う色が混ざり合うメッシュ ─ ポインタで色をたぐり寄せる</div>
+<script>
+(() => {
+"use strict";
+const mesh = document.getElementById("mesh");
+const mctx = mesh.getContext("2d", { willReadFrequently: false });
+const grain = document.getElementById("grain");
+const gctx = grain.getContext("2d");
+
+/* ---- 低解像バッファ(ここで加重ブレンドしてから引き伸ばす) ---- */
+const BUF = document.createElement("canvas");
+const bctx = BUF.getContext("2d");
+const BW = 64, BH = 40;             // メッシュの粗さ。滑らかに補間される
+BUF.width = BW; BUF.height = BH;
+const img = bctx.createImageData(BW, BH);
+
+/* ---- テーマトークン ---- */
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const lum = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+
+const PAL = ["#5bbcb1", "#f0a8bd", "#f1d189", "#bcb2e8", "#f3a890", "#9fc8ea", "#a9dcc0"];
+let base = [250, 247, 241], pts = [];
+const refresh = () => {
+  const bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  const dark = lum(bg) < 0.4;
+  base = bg;
+  // 各色点の色を(外観に応じて彩度/明度を微調整して)確定
+  const cols = PAL.map(hexRgb).map((c) => dark ? mix(c, [20, 24, 28], 0.35) : mix(c, [255, 255, 255], 0.1));
+  if (!pts.length) {
+    pts = cols.map((c, i) => ({
+      x: Math.random(), y: Math.random(),
+      vx: (Math.random() - 0.5) * 0.04, vy: (Math.random() - 0.5) * 0.04,
+      col: c, r: 0.42 + Math.random() * 0.22, ph: Math.random() * 6.28,
+    }));
+  } else {
+    pts.forEach((p, i) => { p.col = cols[i % cols.length]; });
+  }
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+/* ---- 表示キャンバス ---- */
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  for (const cv of [mesh, grain]) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cv.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  buildGrain();
+};
+window.addEventListener("resize", resize);
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+/* ---- 粒状ノイズ(一度だけ生成し soft-light で重ねる) ---- */
+function buildGrain() {
+  const gw = Math.round(W), gh = Math.round(H);
+  const off = document.createElement("canvas");
+  off.width = Math.max(1, Math.round(gw / 2)); off.height = Math.max(1, Math.round(gh / 2));
+  const octx = off.getContext("2d");
+  const id = octx.createImageData(off.width, off.height);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = 90 + Math.random() * 76;
+    id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255;
+  }
+  octx.putImageData(id, 0, 0);
+  gctx.imageSmoothingEnabled = false;
+  gctx.clearRect(0, 0, W, H);
+  gctx.drawImage(off, 0, 0, W, H);
+}
+resize();
+
+/* ---- ポインタ(近い色点を引き寄せる) ---- */
+const pointer = { x: -1, y: -1, active: false };
+const setP = (e) => { pointer.x = e.clientX / W; pointer.y = e.clientY / H; pointer.active = true; };
+window.addEventListener("pointermove", setP, { passive: true });
+window.addEventListener("pointerdown", setP, { passive: true });
+window.addEventListener("pointerup", () => { pointer.active = false; }, { passive: true });
+window.addEventListener("pointerleave", () => { pointer.active = false; }, { passive: true });
+
+/* ---- 逆二乗加重ブレンドでメッシュを計算 ---- */
+function renderMesh() {
+  const d = img.data;
+  for (let j = 0; j < BH; j++) {
+    const py = (j + 0.5) / BH;
+    for (let i = 0; i < BW; i++) {
+      const px = (i + 0.5) / BW;
+      let wr = 0, wg = 0, wb = 0, wsum = 0;
+      for (const p of pts) {
+        const dx = (px - p.x), dy = (py - p.y) * (BH / BW * (W / H)); // アスペクト補正
+        const dist2 = dx * dx + dy * dy + 0.0007;
+        // ガウシアン状の落ち込み(半径 r に依存)
+        const w = Math.exp(-dist2 / (p.r * p.r * 0.5));
+        wr += p.col[0] * w; wg += p.col[1] * w; wb += p.col[2] * w; wsum += w;
+      }
+      // 生成りベースを土台に、色点の寄与を上乗せ
+      const bw = 0.35;
+      wr += base[0] * bw; wg += base[1] * bw; wb += base[2] * bw; wsum += bw;
+      const o = (j * BW + i) * 4;
+      d[o] = wr / wsum; d[o + 1] = wg / wsum; d[o + 2] = wb / wsum; d[o + 3] = 255;
+    }
+  }
+  bctx.putImageData(img, 0, 0);
+}
+
+/* ---- ループ ---- */
+let t = 0, last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (!reduced) {
+    t += dt;
+    for (const p of pts) {
+      // ゆるやかな漂い + わずかな正弦のうねり
+      p.x += (p.vx + Math.sin(t * 0.3 + p.ph) * 0.012) * dt;
+      p.y += (p.vy + Math.cos(t * 0.26 + p.ph) * 0.012) * dt;
+      // 壁で反射
+      if (p.x < 0.05 || p.x > 0.95) p.vx *= -1;
+      if (p.y < 0.05 || p.y > 0.95) p.vy *= -1;
+      p.x = Math.max(0.02, Math.min(0.98, p.x));
+      p.y = Math.max(0.02, Math.min(0.98, p.y));
+      // ポインタへ最寄りを引き寄せる
+      if (pointer.active) {
+        const dx = pointer.x - p.x, dy = pointer.y - p.y;
+        const dd = dx * dx + dy * dy;
+        if (dd < 0.09) { p.x += dx * dt * 1.4; p.y += dy * dt * 1.4; }
+      }
+    }
+  }
+  renderMesh();
+  mctx.imageSmoothingEnabled = true;
+  mctx.clearRect(0, 0, W, H);
+  mctx.drawImage(BUF, 0, 0, BW, BH, -8, -8, W + 16, H + 16); // 端ぼかしのため少し外へ
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

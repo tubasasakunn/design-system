@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="蛍の草むら">
+<meta name="pattern-desc" content="明滅しながらふらつく蛍の群れ。加算合成のグローで淡く光り、ポインタへ緩やかに寄り集まる。">
+<title>蛍の草むら</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .hint {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    font-size: .8rem; color: var(--color-fg-muted); letter-spacing: .04em;
+    background: color-mix(in srgb, var(--color-bg-elevated) 55%, transparent);
+    padding: .5rem 1rem; border-radius: 999px; pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="hint">ポインタに蛍が集まる</div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => { h=h.replace("#",""); if (h.length===3) h=h.replace(/./g,c=>c+c);
+  const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+const mix = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const rgba = (c,a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+// 蛍の光は淡い黄緑。テーマの warning(黄) と mint を混ぜて品よく
+const GLOW = [190, 220, 150], WARM = [241, 209, 137], MINT = [169, 220, 192];
+const C = {};
+const refresh = () => {
+  C.bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.bg2 = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  C.warm = mix(WARM, hexRgb(token("--color-status-warning", "#f0a830")), 0.3);
+  C.glow = mix(GLOW, MINT, 0.4);
+  C.ink = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.muted = hexRgb(token("--color-fg-muted", "#a79f91"));
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+let W=0, H=0, dpr=1;
+const resize = () => { dpr=Math.min(2, window.devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  canvas.width=Math.round(W*dpr); canvas.height=Math.round(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0);
+  buildGrass(); };
+addEventListener("resize", resize);
+
+const rmq = matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches; rmq.addEventListener?.("change", e => reduced = e.matches);
+
+const rand = (a,b) => a + Math.random()*(b-a);
+
+// 前景の草むらシルエット
+let grass = [];
+function buildGrass() {
+  grass = [];
+  const n = Math.round(W/22);
+  for (let i=0;i<=n;i++) {
+    grass.push({ x: (i/n)*W + rand(-8,8), h: rand(40, 130), sway: rand(0,6.28), w: rand(2,5) });
+  }
+}
+
+// 蛍: ふらつきは 2 つの正弦の合成、明滅は独立位相。z で奥行き
+const COUNT = Math.min(70, Math.round(W*H/24000));
+const flies = [];
+function spawn() {
+  const z = Math.random();
+  return {
+    x: rand(0, W), y: rand(H*0.15, H*0.92),
+    z, r: 1.6 + z*2.8,
+    ax: rand(0,6.28), ay: rand(0,6.28),
+    sx: rand(0.25,0.6), sy: rand(0.2,0.5),
+    amp: rand(18, 46),
+    blinkP: rand(0,6.28), blinkS: rand(0.5, 1.3),
+    vx: 0, vy: 0,
+    hue: Math.random(),
+  };
+}
+for (let i=0;i<COUNT;i++) flies.push(spawn());
+
+let pointer = { x: -999, y: -999, active: false };
+function onMove(e){ const r=canvas.getBoundingClientRect(); pointer.x=e.clientX-r.left; pointer.y=e.clientY-r.top; pointer.active=true; }
+addEventListener("pointermove", onMove);
+addEventListener("pointerdown", onMove);
+addEventListener("pointerleave", ()=>pointer.active=false);
+
+resize();
+
+let last = performance.now();
+function frame(now) {
+  let dt = (now-last)/1000; last = now; if (dt>0.05) dt=0.05;
+  const t = now/1000;
+
+  // 夜の草むらの背景（生成りを少し沈ませる）
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, rgba(mix(C.bg2, C.ink, 0.10), 1));
+  g.addColorStop(1, rgba(mix(C.bg, C.ink, 0.22), 1));
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+  // 加算合成で蛍のグロー
+  ctx.globalCompositeOperation = "lighter";
+  for (const f of flies) {
+    if (!reduced) {
+      f.ax += f.sx*dt; f.ay += f.sy*dt;
+      const wanderX = Math.cos(f.ax)*f.amp + Math.sin(f.ax*0.37)*f.amp*0.4;
+      const wanderY = Math.sin(f.ay)*f.amp*0.7;
+      // ふらつきターゲットへ緩く追従
+      let tx = f.hx ?? f.x, ty = f.hy ?? f.y;
+      f.hx = (f.hx ?? f.x); f.hy = (f.hy ?? f.y);
+      // 中心のふらつき基点をゆっくり移動
+      f.cx = (f.cx ?? f.x); f.cy = (f.cy ?? f.y);
+      f.cx += Math.cos(f.ax*0.3+f.z*6)*8*dt; f.cy += Math.sin(f.ay*0.28)*6*dt;
+      let goalX = f.cx + wanderX, goalY = f.cy + wanderY;
+      // ポインタへ寄り集まる（奥ほど弱い）
+      if (pointer.active) {
+        const dx = pointer.x - f.x, dy = pointer.y - f.y, d = Math.hypot(dx,dy)+1;
+        const pull = Math.min(1, 220/d) * (0.4 + f.z) * 60;
+        goalX += (dx/d) * pull; goalY += (dy/d) * pull;
+      }
+      f.vx += (goalX - f.x) * dt * 1.2; f.vy += (goalY - f.y) * dt * 1.2;
+      f.vx *= Math.pow(0.9, dt*60); f.vy *= Math.pow(0.9, dt*60);
+      f.x += f.vx*dt; f.y += f.vy*dt;
+      f.blinkP += f.blinkS*dt;
+      // 画面外ラップ
+      if (f.cx<-60) f.cx=W+60; if (f.cx>W+60) f.cx=-60;
+      f.cy = Math.max(H*0.1, Math.min(H*0.95, f.cy));
+    }
+    // 明滅: 滑らかな脈動。0付近は完全に消える（下品に光り続けない）
+    let blink = (Math.sin(f.blinkP) + 1) * 0.5;
+    blink = Math.pow(blink, 2.4);
+    const glowR = f.r * (8 + f.z*10);
+    const col = mix(C.glow, C.warm, 0.3 + f.hue*0.3);
+    const peak = blink * (0.28 + f.z*0.30);
+
+    // 外側グロー（大きく淡く）
+    const rg = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, glowR);
+    rg.addColorStop(0, rgba(col, peak));
+    rg.addColorStop(0.4, rgba(col, peak*0.35));
+    rg.addColorStop(1, rgba(col, 0));
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(f.x, f.y, glowR, 0, 6.2832); ctx.fill();
+    // コア
+    ctx.fillStyle = rgba(mix(col, [255,255,240], 0.6), peak*1.4);
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.r*0.9, 0, 6.2832); ctx.fill();
+  }
+  ctx.globalCompositeOperation = "source-over";
+
+  // 前景の草むら（蛍の手前）
+  ctx.strokeStyle = rgba(mix(C.ink, C.bg, 0.25), 0.9);
+  ctx.lineCap = "round";
+  for (const b of grass) {
+    const s = reduced ? 0 : Math.sin(t*0.6 + b.sway)*10;
+    ctx.lineWidth = b.w;
+    ctx.beginPath();
+    ctx.moveTo(b.x, H+2);
+    ctx.quadraticCurveTo(b.x + s*0.5, H - b.h*0.6, b.x + s, H - b.h);
+    ctx.stroke();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

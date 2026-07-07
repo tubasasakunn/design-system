@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="弾むインクバー">
+<meta name="pattern-desc" content="タブ切替でインクバーがオーバーシュートしながら移動し、進行方向へ伸びて縮む。パネルは方向付きでスライドする。">
+<title>弾むインクバー</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  .card {
+    width: min(620px, 100%);
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    border-radius: 24px;
+    padding: 12px 12px 0;
+    box-shadow: 0 8px 30px rgba(40,35,25,.06);
+    overflow: hidden;
+  }
+  .tabs {
+    position: relative;
+    display: flex;
+    gap: 4px;
+    padding: 6px;
+  }
+  .tab {
+    position: relative;
+    flex: 1;
+    z-index: 1;
+    background: none; border: none;
+    font: inherit; font-size: .92rem; font-weight: 540;
+    color: var(--color-fg-muted);
+    padding: 12px 8px 18px;
+    cursor: pointer;
+    border-radius: 14px;
+    transition: color .35s ease;
+    white-space: nowrap;
+  }
+  .tab.active { color: var(--color-accent-fg); }
+  .ink {
+    position: absolute;
+    left: 0; bottom: 8px;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--color-accent-default);
+    transform-origin: left center;
+    will-change: transform;
+    pointer-events: none;
+  }
+  .stage {
+    position: relative;
+    overflow: hidden;
+    border-top: 1px solid var(--color-border-default);
+    margin-top: 2px;
+  }
+  .panels {
+    position: relative;
+    min-height: 220px;
+  }
+  .panel {
+    position: absolute;
+    inset: 0;
+    padding: 28px 24px 34px;
+    will-change: transform, opacity;
+  }
+  .panel h2 { font-size: 1.15rem; font-weight: 620; margin-bottom: 12px; letter-spacing: .01em; }
+  .panel p { color: var(--color-fg-secondary); line-height: 1.85; font-size: .93rem; }
+  .panel .meta {
+    margin-top: 18px; display: flex; gap: 8px; flex-wrap: wrap;
+  }
+  .chip {
+    font-size: .74rem; letter-spacing: .03em;
+    color: var(--color-fg-secondary);
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border-default);
+    padding: .32em .8em; border-radius: 999px;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="tabs" id="tabs">
+    <button class="tab active">概要</button>
+    <button class="tab">トークン</button>
+    <button class="tab">アイコン</button>
+    <button class="tab">配布</button>
+    <span class="ink" id="ink"></span>
+  </div>
+  <div class="stage">
+    <div class="panels" id="panels">
+      <section class="panel"><h2>ひとつの原本から</h2><p>人が編集するのは sources/ のプラットフォーム非依存な原本だけ。生 SVG と JSON トークンが唯一の正です。</p><div class="meta"><span class="chip">single source of truth</span><span class="chip">依存ゼロ</span></div></section>
+      <section class="panel"><h2>セマンティックトークン</h2><p>用途ベースの名前で色を揃えます。bg・fg・accent・border・status。全テーマ・全外観で同じキー集合を保ちます。</p><div class="meta"><span class="chip">--color-accent-default</span><span class="chip">light / dark</span></div></section>
+      <section class="panel"><h2>複数スタイルを併存</h2><p>丸み系 rounded とカクカク系 sharp を同居させます。同じ意味のアイコンを別スタイルで両方持てる前提です。</p><div class="meta"><span class="chip">rounded</span><span class="chip">sharp</span></div></section>
+      <section class="panel"><h2>Web と Swift へ</h2><p>同じ原本から派生するので、アイコン名もカラートークン名も両プラットフォームで一致します。</p><div class="meta"><span class="chip">Vite</span><span class="chip">SwiftPackage</span></div></section>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const tabs = [...document.querySelectorAll(".tab")];
+  const panels = [...document.querySelectorAll(".panel")];
+  const ink = document.getElementById("ink");
+
+  let current = 0;
+  // ばね状態: x = バー左端位置, w = 幅（基準幅に対するスケールで表現）
+  const spring = { x: 0, w: 0, vx: 0, vw: 0, tx: 0, tw: 0 };
+  const K = 210, D = 22;          // 剛性 / 減衰
+  let baseW = 0;                  // scaleX=1 の基準幅
+  let last = performance.now();
+  let raf = 0;
+
+  function tabRect(i) {
+    const t = tabs[i], parent = t.offsetParent;
+    return { x: t.offsetLeft, w: t.offsetWidth };
+  }
+
+  function setTarget(i) {
+    const r = tabRect(i);
+    spring.tx = r.x;
+    spring.tw = r.w;
+  }
+
+  function layoutInstant() {
+    const r = tabRect(current);
+    baseW = r.w;
+    ink.style.width = baseW + "px";
+    spring.x = spring.tx = r.x;
+    spring.w = spring.tw = r.w;
+    render();
+  }
+
+  function render() {
+    // ink は width:baseW を基準に、位置は translateX、伸縮は scaleX
+    const sx = spring.w / baseW;
+    ink.style.transform = `translateX(${spring.x.toFixed(2)}px) scaleX(${sx.toFixed(4)})`;
+  }
+
+  function step(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    // 位置ばね
+    const ax = K * (spring.tx - spring.x) - D * spring.vx;
+    spring.vx += ax * dt;
+    spring.x += spring.vx * dt;
+
+    // 幅ばね: 移動中は左右端を別々に追うことで進行方向へ伸びる。
+    // 目標の右端に追従する速い成分と左端の遅れを合成 → 伸びて縮む挙動。
+    const leadingEdge = spring.tx + spring.tw;   // 目標右端
+    const trailingEdge = spring.tx;              // 目標左端
+    // 現在の右端 = x + w。右端を速めに、左端(=x)を上のばねで。
+    const curRight = spring.x + spring.w;
+    const arEdge = K * 1.35 * (leadingEdge - curRight) - D * 0.9 * (spring.vx + spring.vw);
+    // 右端の速度を積分 → 幅速度へ反映（左端速度 vx を差し引く）
+    spring.vw += arEdge * dt;
+    let newRight = curRight + (spring.vx + spring.vw) * dt;
+    spring.w = newRight - spring.x;
+    // 幅が潰れないように下限
+    if (spring.w < 6) { spring.w = 6; spring.vw *= 0.3; }
+
+    render();
+
+    const settled =
+      Math.abs(spring.tx - spring.x) < 0.15 && Math.abs(spring.vx) < 0.15 &&
+      Math.abs(spring.tw - spring.w) < 0.15 && Math.abs(spring.vw) < 0.15;
+    if (settled) {
+      spring.x = spring.tx; spring.w = spring.tw;
+      spring.vx = spring.vw = 0;
+      render();
+      raf = 0;
+      return;
+    }
+    raf = requestAnimationFrame(step);
+  }
+
+  function kick() {
+    if (rm.matches) { setTarget(current); layoutInstant(); return; }
+    last = performance.now();
+    if (!raf) raf = requestAnimationFrame(step);
+  }
+
+  function slidePanels(prev, next) {
+    const dir = next > prev ? 1 : -1;
+    if (rm.matches) {
+      panels.forEach((p, i) => { p.style.opacity = i === next ? "1" : "0"; p.style.transform = "none"; p.style.pointerEvents = i === next ? "auto" : "none"; });
+      return;
+    }
+    const OUT = "cubic-bezier(.4,0,.6,1)", IN = "cubic-bezier(.16,.84,.3,1)";
+    panels.forEach((p) => { if (p.anim) p.anim.cancel(); });
+    const outP = panels[prev], inP = panels[next];
+    outP.style.pointerEvents = "none";
+    inP.style.pointerEvents = "auto";
+    outP.anim = outP.animate(
+      [{ transform: "translateX(0)", opacity: 1 }, { transform: `translateX(${-dir * 26}px)`, opacity: 0 }],
+      { duration: 260, easing: OUT, fill: "forwards" }
+    );
+    inP.anim = inP.animate(
+      [{ transform: `translateX(${dir * 44}px)`, opacity: 0 }, { transform: "translateX(0)", opacity: 1 }],
+      { duration: 460, easing: IN, fill: "forwards" }
+    );
+  }
+
+  function select(i) {
+    if (i === current) return;
+    const prev = current;
+    current = i;
+    tabs.forEach((t, k) => t.classList.toggle("active", k === i));
+    setTarget(i);
+    kick();
+    slidePanels(prev, i);
+  }
+
+  tabs.forEach((t, i) => t.addEventListener("click", () => select(i)));
+
+  // 初期パネル配置
+  panels.forEach((p, i) => {
+    p.style.opacity = i === 0 ? "1" : "0";
+    p.style.pointerEvents = i === 0 ? "auto" : "none";
+  });
+
+  function onResize() { setTarget(current); layoutInstant(); }
+  window.addEventListener("resize", onResize);
+  requestAnimationFrame(layoutInstant);
+})();
+</script>
+</body>
+</html>

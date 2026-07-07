@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>波打つ文字</title>
+<meta name="pattern-title" content="波打つ文字">
+<meta name="pattern-desc" content="各文字が位相差の正弦波でうねり呼吸する見出し。ホバーすると波の振幅が増す。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid; place-items: center;
+    height: 100dvh;
+  }
+  #stage { text-align: center; padding: 1rem; user-select: none; }
+  .line {
+    display: block;
+    font-weight: 800;
+    letter-spacing: .02em;
+    line-height: 1.18;
+    white-space: nowrap;
+    cursor: default;
+  }
+  .line.big { font-size: clamp(2.6rem, 12vw, 6rem); }
+  .line.sub {
+    font-size: clamp(.9rem, 3.4vw, 1.35rem);
+    font-weight: 600;
+    color: var(--color-fg-secondary);
+    letter-spacing: .12em;
+    margin-top: .8rem;
+  }
+  .ch {
+    display: inline-block;
+    will-change: transform;
+    transform: translateZ(0);
+  }
+  .ch.space { width: .34em; }
+  #hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    padding: .5rem 1.1rem; border-radius: 999px;
+    font-size: .78rem; letter-spacing: .06em;
+    color: var(--color-fg-muted);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <span class="line big" data-amp="1">しずかな 波</span>
+  <span class="line sub" data-amp="0.55">ゆらり、ことばが呼吸する</span>
+</div>
+<div id="hint">文字に触れると 波が高くなる</div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const lines = [...document.querySelectorAll(".line")];
+  const glyphs = [];
+
+  // 各行を 1 文字ずつ span に分割し、位相を割り当てる
+  let globalIndex = 0;
+  for (const line of lines) {
+    const text = line.textContent;
+    line.textContent = "";
+    const baseAmp = parseFloat(line.dataset.amp) || 1;
+    for (const chr of [...text]) {
+      const span = document.createElement("span");
+      span.className = "ch";
+      if (chr === " " || chr === "　") {
+        span.classList.add("space");
+        line.appendChild(span);
+        continue;
+      }
+      span.textContent = chr;
+      line.appendChild(span);
+      glyphs.push({
+        el: span,
+        phase: globalIndex * 0.5,        // 隣り合う文字の位相差
+        baseAmp,
+        hover: 0,                        // 0..1 ホバー励起量
+        target: 0,
+      });
+      globalIndex++;
+    }
+  }
+
+  // ホバー / タッチで近傍の文字の振幅を上げる
+  const stage = document.getElementById("stage");
+  let pointer = { x: -9999, y: -9999, active: false };
+  function onMove(e) {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.active = true;
+  }
+  function onLeave() { pointer.active = false; }
+  stage.addEventListener("pointermove", onMove);
+  stage.addEventListener("pointerdown", onMove);
+  stage.addEventListener("pointerleave", onLeave);
+  window.addEventListener("blur", onLeave);
+
+  const AMP = 26;           // 基本振幅(px)
+  const HOVER_RADIUS = 120; // ホバー影響半径
+  const OMEGA = 2.2;        // 角速度
+
+  let t = 0, last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    t += dt;
+
+    // ホバー励起を各文字へ（中心距離で減衰）
+    if (!reduce.matches) {
+      for (const g of glyphs) {
+        let want = 0;
+        if (pointer.active) {
+          const r = g.el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const d = Math.hypot(pointer.x - cx, pointer.y - cy);
+          want = Math.max(0, 1 - d / HOVER_RADIUS);
+        }
+        g.target = want;
+        // なめらかに追従（フレームレート非依存の指数追従）
+        const k = 1 - Math.exp(-6 * dt);
+        g.hover += (g.target - g.hover) * k;
+      }
+    }
+
+    for (const g of glyphs) {
+      const amp = AMP * g.baseAmp * (0.62 + g.hover * 1.5);
+      const wob = amp * Math.sin(t * OMEGA - g.phase);
+      // 呼吸: 波の高い所ほどわずかに拡大・明色化
+      const breath = 1 + 0.06 * Math.sin(t * OMEGA - g.phase) + g.hover * 0.14;
+      const rot = (g.hover * 8) * Math.cos(t * OMEGA - g.phase);
+      g.el.style.transform =
+        "translateY(" + wob.toFixed(2) + "px) scale(" + breath.toFixed(3) + ") rotate(" + rot.toFixed(2) + "deg)";
+      g.el.style.color = g.hover > 0.04
+        ? "color-mix(in srgb, var(--color-accent-default) " + Math.round(g.hover * 100) + "%, currentColor)"
+        : "";
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function staticPose() {
+    for (const g of glyphs) g.el.style.transform = "none";
+  }
+
+  if (reduce.matches) staticPose();
+  requestAnimationFrame((n) => { last = n; requestAnimationFrame(frame); });
+  reduce.addEventListener?.("change", () => { if (reduce.matches) staticPose(); });
+})();
+</script>
+</body>
+</html>

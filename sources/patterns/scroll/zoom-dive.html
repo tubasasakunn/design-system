@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ズームダイブ">
+<meta name="pattern-desc" content="スクロールで雲海から山なみ・森・家へと層を抜けながら深くズームインし、最後は灯る窓辺へたどり着く。">
+<title>ズームダイブ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--color-bg-primary); color: var(--color-fg-primary); font-family: system-ui, sans-serif; }
+  .track { height: 560vh; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .labels { position: fixed; left: 8vw; top: 50%; transform: translateY(-50%); z-index: 4; pointer-events: none; }
+  .labels .lb { position: absolute; left: 0; top: 0; transform: translateY(-50%); opacity: 0; white-space: nowrap; will-change: opacity, transform; }
+  .labels .k { font-size: clamp(40px, 8vw, 96px); font-weight: 200; letter-spacing: .08em; line-height: 1; }
+  .labels .s { margin-top: 12px; font-size: .78rem; letter-spacing: .3em; color: var(--color-fg-secondary); }
+
+  .head { position: fixed; left: 8vw; top: 7vh; z-index: 4; pointer-events: none; }
+  .head h1 { font-size: 1.02rem; font-weight: 600; letter-spacing: .12em; }
+  .head p { margin-top: 6px; font-size: .76rem; letter-spacing: .1em; color: var(--color-fg-muted); }
+
+  .meter { position: fixed; right: 26px; top: 50%; transform: translateY(-50%); width: 2px; height: 34vh; border-radius: 2px; background: var(--color-border-default); z-index: 4; pointer-events: none; }
+  .meter i { position: absolute; left: 0; top: 0; width: 100%; border-radius: 2px; background: var(--color-accent-default); }
+</style>
+</head>
+<body>
+<div class="track" aria-hidden="true"></div>
+<canvas id="c"></canvas>
+<div class="labels" id="labels"></div>
+<div class="head"><h1>ズームダイブ</h1><p>スクロールで層を抜けていきます</p></div>
+<div class="meter"><i id="meterFill" style="height:0%"></i></div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  const hex = (h) => { h = h.replace("#", ""); if (h.length === 3) h = h.split("").map((c) => c + c).join(""); const n = parseInt(h.slice(0, 6), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const rgb = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const smooth = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+
+  const PASTEL = { pink: hex("#f0a8bd"), sky: hex("#9fc8ea"), yellow: hex("#f1d189"), lav: hex("#bcb2e8"), coral: hex("#f3a890"), mint: hex("#a9dcc0"), teal: hex("#5bbcb1") };
+
+  let COL = {};
+  function readColors() {
+    COL.bg = hex(token("--color-bg-primary", "#faf7f1"));
+    COL.sec = hex(token("--color-bg-secondary", "#f1ece2"));
+    COL.elev = hex(token("--color-bg-elevated", "#fffdf9"));
+    COL.ink = hex(token("--color-fg-primary", "#2c2a26"));
+    COL.deep = hex(token("--color-accent-fg", "#07312d"));
+    COL.warn = hex(token("--color-status-warning", "#f0a830"));
+    COL.dark = (COL.bg[0] + COL.bg[1] + COL.bg[2]) / 3 < 128;
+  }
+  readColors();
+  new MutationObserver(readColors).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  const LAYERS = [
+    { k: "雲海", s: "くもの海", tint: PASTEL.sky },
+    { k: "山なみ", s: "とおい稜線", tint: PASTEL.lav },
+    { k: "森", s: "みどりの底", tint: PASTEL.mint },
+    { k: "家", s: "ちいさな灯", tint: PASTEL.coral },
+    { k: "窓辺", s: "たどりつく", tint: PASTEL.yellow },
+  ];
+  const N = LAYERS.length;
+
+  const labelsWrap = document.getElementById("labels");
+  const labelEls = LAYERS.map((l) => { const d = document.createElement("div"); d.className = "lb"; d.innerHTML = `<div class="k">${l.k}</div><div class="s">${l.s}</div>`; labelsWrap.appendChild(d); return d; });
+  const meterFill = document.getElementById("meterFill");
+
+  let W = 0, H = 0, fit = 0;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight; fit = Math.min(W, H) * 0.62;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  // ---- 各層のシーン（正規化座標 約[-1,1] に描く。alpha はフェード）----
+  const puffs = Array.from({ length: 7 }, (_, i) => { let s = (i * 2654435761 + 7) >>> 0; const r = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); return { x: (r() - 0.5) * 2.0, y: (r() - 0.5) * 1.2, r: 0.25 + r() * 0.3, v: 0.02 + r() * 0.04 }; });
+  const scenes = [
+    // 0 雲海
+    (alpha, time, tint) => {
+      for (const p of puffs) {
+        const px = p.x + (rm.matches ? 0 : Math.sin(time * p.v + p.x) * 0.03);
+        const g = ctx.createRadialGradient(px, p.y, 0, px, p.y, p.r);
+        g.addColorStop(0, rgb(mix(COL.elev, tint, 0.25), alpha * 0.9));
+        g.addColorStop(1, rgb(tint, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, p.y, p.r, 0, 6.28); ctx.fill();
+      }
+    },
+    // 1 山なみ
+    (alpha, time, tint) => {
+      const ridges = [{ y: 0.35, c: 0.18, h: 0.9 }, { y: 0.5, c: 0.3, h: 0.7 }, { y: 0.62, c: 0.45, h: 0.55 }];
+      for (const rd of ridges) {
+        ctx.beginPath(); ctx.moveTo(-1.3, 1.3);
+        const peaks = 4;
+        for (let i = 0; i <= peaks; i++) {
+          const x = -1.2 + (i / peaks) * 2.4;
+          const hy = rd.y - Math.abs(Math.sin(i * 1.7 + rd.y * 8)) * rd.h * 0.5;
+          ctx.lineTo(x, hy);
+        }
+        ctx.lineTo(1.3, 1.3); ctx.closePath();
+        ctx.fillStyle = rgb(mix(COL.sec, tint, rd.c), alpha); ctx.fill();
+        // 雪冠
+        ctx.fillStyle = rgb(mix(COL.elev, tint, 0.1), alpha * 0.7);
+        for (let i = 1; i < peaks; i++) {
+          const x = -1.2 + (i / peaks) * 2.4;
+          const hy = rd.y - Math.abs(Math.sin(i * 1.7 + rd.y * 8)) * rd.h * 0.5;
+          ctx.beginPath(); ctx.moveTo(x, hy); ctx.lineTo(x - 0.06, hy + 0.09); ctx.lineTo(x + 0.06, hy + 0.09); ctx.closePath(); ctx.fill();
+        }
+      }
+    },
+    // 2 森
+    (alpha, time, tint) => {
+      // 地面
+      ctx.fillStyle = rgb(mix(COL.sec, tint, 0.3), alpha);
+      ctx.beginPath(); ctx.moveTo(-1.3, 0.35); ctx.quadraticCurveTo(0, 0.2, 1.3, 0.35); ctx.lineTo(1.3, 1.3); ctx.lineTo(-1.3, 1.3); ctx.closePath(); ctx.fill();
+      // 木の列（奥→手前）
+      for (let row = 0; row < 3; row++) {
+        const baseY = 0.34 + row * 0.24;
+        const cnt = 5 + row * 2;
+        for (let i = 0; i < cnt; i++) {
+          const x = -1.1 + (i / (cnt - 1)) * 2.2 + (row % 2) * 0.12;
+          const sway = rm.matches ? 0 : Math.sin(time * 0.8 + i + row) * 0.01 * (row + 1);
+          const th = 0.16 + row * 0.05;
+          ctx.fillStyle = rgb(mix(COL.deep, tint, 0.35 - row * 0.08), alpha * (0.7 + row * 0.1));
+          ctx.beginPath();
+          ctx.moveTo(x + sway, baseY - th); ctx.lineTo(x - th * 0.4, baseY); ctx.lineTo(x + th * 0.4, baseY); ctx.closePath(); ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(x + sway * 0.6, baseY - th * 1.5); ctx.lineTo(x - th * 0.3, baseY - th * 0.6); ctx.lineTo(x + th * 0.3, baseY - th * 0.6); ctx.closePath(); ctx.fill();
+        }
+      }
+    },
+    // 3 家
+    (alpha, time, tint) => {
+      const w = 0.9, h = 0.7, y = 0.5;
+      // 地面
+      ctx.fillStyle = rgb(mix(COL.sec, PASTEL.mint, 0.35), alpha);
+      ctx.fillRect(-1.3, y, 2.6, 1.3);
+      // 壁
+      ctx.fillStyle = rgb(mix(COL.elev, tint, 0.12), alpha);
+      ctx.fillRect(-w / 2, y - h, w, h);
+      ctx.strokeStyle = rgb(mix(COL.ink, tint, 0.2), alpha * 0.5); ctx.lineWidth = 0.008; ctx.strokeRect(-w / 2, y - h, w, h);
+      // 屋根
+      ctx.fillStyle = rgb(mix(COL.ink, tint, 0.3), alpha);
+      ctx.beginPath(); ctx.moveTo(-w / 2 - 0.08, y - h); ctx.lineTo(0, y - h - 0.4); ctx.lineTo(w / 2 + 0.08, y - h); ctx.closePath(); ctx.fill();
+      // 灯る窓（次の層への入口）
+      const glow = rgb(mix(COL.warn, COL.elev, 0.2), alpha);
+      ctx.fillStyle = glow; ctx.fillRect(-0.16, y - 0.42, 0.32, 0.3);
+      ctx.strokeStyle = rgb(mix(COL.ink, tint, 0.3), alpha); ctx.lineWidth = 0.012;
+      ctx.beginPath(); ctx.moveTo(0, y - 0.42); ctx.lineTo(0, y - 0.12); ctx.moveTo(-0.16, y - 0.27); ctx.lineTo(0.16, y - 0.27); ctx.stroke();
+      // ドア
+      ctx.fillStyle = rgb(mix(COL.deep, tint, 0.2), alpha);
+      ctx.fillRect(-0.36, y - 0.34, 0.14, 0.34);
+    },
+    // 4 窓辺（到達）
+    (alpha, time, tint) => {
+      // 室内の暖かな光
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1.4);
+      g.addColorStop(0, rgb(mix(COL.warn, COL.elev, 0.35), alpha * 0.9));
+      g.addColorStop(1, rgb(mix(COL.elev, tint, 0.2), alpha * 0.6));
+      ctx.fillStyle = g; ctx.fillRect(-1.4, -1.4, 2.8, 2.8);
+      // 窓枠（角丸）
+      const wx = 0.72, wy = 0.86;
+      const rr = 0.12;
+      ctx.strokeStyle = rgb(mix(COL.ink, tint, 0.25), alpha); ctx.lineWidth = 0.05;
+      roundRect(-wx, -wy, wx * 2, wy * 2, rr); ctx.stroke();
+      // 桟
+      ctx.lineWidth = 0.03;
+      ctx.beginPath(); ctx.moveTo(0, -wy); ctx.lineTo(0, wy); ctx.moveTo(-wx, 0); ctx.lineTo(wx, 0); ctx.stroke();
+      // ガラス越しの光の粒
+      if (!rm.matches) {
+        for (let i = 0; i < 6; i++) {
+          const a = time * 0.3 + i;
+          const x = Math.sin(a * 1.3 + i) * wx * 0.7, py = Math.cos(a + i * 2) * wy * 0.7;
+          ctx.fillStyle = rgb(mix(COL.warn, COL.elev, 0.4), alpha * (0.3 + 0.2 * Math.sin(a * 3)));
+          ctx.beginPath(); ctx.arc(x, py, 0.03, 0, 6.28); ctx.fill();
+        }
+      }
+      // 窓辺の小さな鉢植え
+      ctx.fillStyle = rgb(mix(COL.deep, tint, 0.2), alpha);
+      ctx.fillRect(-0.5, wy - 0.16, 0.2, 0.16);
+      ctx.fillStyle = rgb(PASTEL.mint, alpha);
+      ctx.beginPath(); ctx.arc(-0.4, wy - 0.22, 0.11, 0, 6.28); ctx.fill();
+    },
+  ];
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  let progress = 0, t = 0, shown = 0;
+  let px = 0, py = 0, tpx = 0, tpy = 0;
+  const readScroll = () => { const max = document.documentElement.scrollHeight - innerHeight; progress = max > 0 ? clamp(scrollY / max, 0, 1) : 0; t = progress * (N - 1); };
+  addEventListener("scroll", readScroll, { passive: true });
+  addEventListener("resize", () => { resize(); readScroll(); });
+  addEventListener("pointermove", (e) => { tpx = (e.clientX / innerWidth - 0.5); tpy = (e.clientY / innerHeight - 0.5); }, { passive: true });
+  resize(); readScroll();
+
+  let last = performance.now(), time = 0;
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    shown += (t - shown) * (1 - Math.exp(-dt * 6));
+    if (!rm.matches) time += dt;
+    px += (tpx - px) * (1 - Math.exp(-dt * 4)); py += (tpy - py) * (1 - Math.exp(-dt * 4));
+
+    // 背景（浅い＝空の青、深い＝暖色へ）
+    const warm = clamp(shown / (N - 1), 0, 1);
+    const top = mix(mix(COL.bg, PASTEL.sky, COL.dark ? 0.15 : 0.35), mix(COL.bg, PASTEL.yellow, 0.25), warm);
+    const bot = mix(mix(COL.sec, PASTEL.lav, COL.dark ? 0.12 : 0.28), mix(COL.sec, PASTEL.coral, 0.22), warm);
+    const bgg = ctx.createLinearGradient(0, 0, 0, H);
+    bgg.addColorStop(0, rgb(top)); bgg.addColorStop(1, rgb(bot));
+    ctx.fillStyle = bgg; ctx.fillRect(0, 0, W, H);
+
+    // 深い層（大きい i, 小さい local）から手前へ描く
+    for (let i = N - 1; i >= 0; i--) {
+      const local = shown - i;                        // <0:奥, >0:通過中
+      const s = Math.pow(2.6, local);                 // ズーム倍率
+      if (s < 0.04 || s > 8) continue;
+      const appear = smooth((local + 2.4) / 1.7);
+      const gone = smooth((local - 0.5) / 0.9);
+      const alpha = appear * (1 - gone);
+      if (alpha < 0.01) continue;
+
+      const par = (i - shown) * 0.04;                 // 層ごとの視差
+      ctx.save();
+      ctx.translate(W / 2 + px * W * 0.05 + par * W * px * 0.2, H / 2 + py * H * 0.05);
+      ctx.scale(s * fit, s * fit);
+      ctx.globalAlpha = 1;
+      scenes[i](alpha, time, LAYERS[i].tint);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    // ラベル
+    for (let i = 0; i < N; i++) {
+      const w = clamp(1 - Math.abs(shown - i) * 1.3, 0, 1);
+      labelEls[i].style.opacity = smooth(w).toFixed(3);
+      labelEls[i].style.transform = `translateY(calc(-50% + ${((1 - w) * 16 * (shown > i ? -1 : 1)).toFixed(1)}px))`;
+    }
+    meterFill.style.height = (progress * 100).toFixed(1) + "%";
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

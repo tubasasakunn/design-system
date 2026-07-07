@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="提灯の夜">
+<meta name="pattern-desc" content="吊り元を支点に振り子で揺れる提灯の群れ。クリックでひとつずつ灯り、地面に淡く映る。">
+<title>提灯の夜</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary);
+  }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: pointer; }
+  .panel {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: .9rem;
+    padding: .5rem 1.1rem; border-radius: 999px; font-size: .8rem; letter-spacing: .04em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px); pointer-events: none; white-space: nowrap;
+  }
+  .panel b { color: var(--color-accent-default); font-variant-numeric: tabular-nums; font-size: 1rem; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="panel"><span>提灯にふれて灯す</span><span>ともした <b id="lit">0</b> / <b id="total">0</b></span></div>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("stage");
+const ctx = canvas.getContext("2d");
+const litEl = document.getElementById("lit");
+const totalEl = document.getElementById("total");
+
+/* ---- テーマトークン ---- */
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const lum = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+
+const C = {};
+const refresh = () => {
+  const bg = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  const bg2 = hexRgb(token("--color-bg-secondary", "#f1ece2"));
+  const ink = hexRgb(token("--color-accent-fg", "#07312d"));
+  const dark = lum(bg) < 0.4;
+  // 夜。提灯が映えるよう深く沈める
+  C.top = dark ? bg2 : mix(bg2, ink, 0.90);
+  C.bot = dark ? bg : mix(bg, ink, 0.80);
+  C.ground = dark ? mix(bg, [0, 0, 0], 0.3) : mix(bg, ink, 0.86);
+  C.paperOff = dark ? mix(bg2, [60, 55, 50], 0.4) : mix(bg2, ink, 0.35); // 消灯時の紙
+  C.warm = hexRgb("#f1d189");    // 灯りの黄
+  C.warmHi = hexRgb("#fffdf9");
+  C.coral = hexRgb("#f3a890");
+  C.frame = dark ? hexRgb(token("--color-fg-muted", "#a79f91")) : ink;
+};
+refresh();
+new MutationObserver(refresh).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+/* ---- キャンバス ---- */
+let W = 0, H = 0, dpr = 1;
+const resize = () => {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  layout();
+};
+window.addEventListener("resize", resize);
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+/* ---- 提灯(吊り元=支点の振り子) ---- */
+let lanterns = [];
+const GROUND = () => H * 0.86;
+function layout() {
+  const prevLit = lanterns.filter((l) => l.lit).map((l) => l.idx);
+  lanterns = [];
+  const cols = Math.max(3, Math.round(W / 190));
+  const gap = W / (cols + 1);
+  let idx = 0;
+  for (let i = 0; i < cols; i++) {
+    const px = gap * (i + 1);
+    // 列ごとに吊り高さと本数を少し変える
+    const rows = 1 + (i % 2);
+    for (let r = 0; r < rows; r++) {
+      const size = Math.min(W, H) * (0.052 + Math.random() * 0.02);
+      const L = H * (0.16 + r * 0.16 + Math.random() * 0.05); // 紐の長さ
+      lanterns.push({
+        idx, px, pivotY: H * 0.02, L, size,
+        theta: reduced ? 0 : (Math.random() - 0.5) * 0.5,   // 支点まわりの角度(鉛直基準)。低刺激時は静止
+        omega: reduced ? 0 : (Math.random() - 0.5) * 0.4,   // 角速度
+        phase: Math.random() * 6.28,
+        lit: false, glow: 0,
+        hue: Math.random() < 0.25 ? C.coral : C.warm,
+        flick: Math.random() * 6.28,
+      });
+      idx++;
+    }
+  }
+  totalEl.textContent = lanterns.length;
+  for (const l of lanterns) if (prevLit.includes(l.idx)) { l.lit = true; l.glow = 1; }
+  updateCount();
+}
+function updateCount() { litEl.textContent = lanterns.filter((l) => l.lit).length; }
+resize();
+
+/* 提灯先端の座標(支点から鉛直基準に theta 傾いた振り子) */
+function bob(l) {
+  return { x: l.px + Math.sin(l.theta) * l.L, y: l.pivotY + Math.cos(l.theta) * l.L };
+}
+
+/* ---- 入力: 近い提灯を灯す ---- */
+function ignite(x, y) {
+  let best = null, bd = 1e9;
+  for (const l of lanterns) {
+    const b = bob(l);
+    const d = Math.hypot(b.x - x, b.y - y);
+    if (d < bd) { bd = d; best = l; }
+  }
+  if (best && bd < best.size * 2.2) {
+    best.lit = !best.lit;
+    // つついた勢いで少し揺らす
+    best.omega += (x < best.px ? 1 : -1) * 0.6;
+    updateCount();
+  }
+}
+canvas.addEventListener("pointerdown", (e) => ignite(e.clientX, e.clientY));
+
+/* ---- 風(全体をゆっくり押す外力) ---- */
+let t = 0, last = performance.now();
+const gravity = 9.0;
+
+function step(dt) {
+  const windBase = reduced ? 0 : Math.sin(t * 0.5) * 0.25 + Math.sin(t * 1.3) * 0.12;
+  for (const l of lanterns) {
+    // 振り子: θ'' = -(g/L)·sinθ - c·θ' + 風(各提灯で少し位相ずらし)
+    const wind = windBase + (reduced ? 0 : Math.sin(t * 1.7 + l.phase) * 0.18);
+    const acc = -(gravity / l.L) * Math.sin(l.theta) - 0.9 * l.omega + wind * 0.6;
+    l.omega += acc * dt;
+    l.theta += l.omega * dt;
+    // 灯りのイージング
+    l.glow += ((l.lit ? 1 : 0) - l.glow) * Math.min(1, dt * 3.5);
+  }
+}
+
+/* ---- 提灯の描画 ---- */
+function drawLantern(l) {
+  const b = bob(l);
+  const flick = l.lit && !reduced ? 0.85 + 0.15 * Math.sin(t * 9 + l.flick) + 0.05 * Math.sin(t * 23 + l.flick) : 1;
+  const g = l.glow * flick;
+  const s = l.size;
+
+  // 紐
+  ctx.beginPath();
+  ctx.strokeStyle = rgba(C.frame, 0.5);
+  ctx.lineWidth = 1;
+  ctx.moveTo(l.px, l.pivotY);
+  ctx.lineTo(b.x, b.y - s * 1.05);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(l.theta * 0.5); // 提灯本体も少しだけ傾ける
+
+  // 灯りのハロ(加算)
+  if (g > 0.01) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 4.2);
+    halo.addColorStop(0, rgba(mix(l.hue, C.warmHi, 0.5), 0.42 * g));
+    halo.addColorStop(0.35, rgba(l.hue, 0.16 * g));
+    halo.addColorStop(1, rgba(l.hue, 0));
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(0, 0, s * 4.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // 上下の口金
+  ctx.fillStyle = rgba(C.frame, 0.9);
+  ctx.fillRect(-s * 0.34, -s * 1.12, s * 0.68, s * 0.14);
+  ctx.fillRect(-s * 0.34, s * 0.98, s * 0.68, s * 0.14);
+
+  // 紙(提灯本体) — 縦長の樽形。点灯で内側から発光
+  const bodyCol = l.lit ? mix(l.hue, C.warmHi, 0.25 * g) : C.paperOff;
+  const grad = ctx.createLinearGradient(-s, 0, s, 0);
+  grad.addColorStop(0, rgba(mix(bodyCol, [0, 0, 0], 0.25), 1));
+  grad.addColorStop(0.5, rgba(l.lit ? mix(l.hue, C.warmHi, 0.35 * g) : mix(bodyCol, [255, 255, 255], 0.06), 1));
+  grad.addColorStop(1, rgba(mix(bodyCol, [0, 0, 0], 0.25), 1));
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  // 樽形の輪郭
+  ctx.moveTo(-s * 0.5, -s);
+  ctx.quadraticCurveTo(-s * 1.02, 0, -s * 0.5, s);
+  ctx.lineTo(s * 0.5, s);
+  ctx.quadraticCurveTo(s * 1.02, 0, s * 0.5, -s);
+  ctx.closePath();
+  ctx.fill();
+
+  // 横の骨(リブ)
+  ctx.strokeStyle = rgba(mix(C.frame, bodyCol, 0.4), l.lit ? 0.35 : 0.5);
+  ctx.lineWidth = 1;
+  for (let k = -3; k <= 3; k++) {
+    const yy = (k / 3) * s * 0.92;
+    const wj = Math.cos((k / 3) * Math.PI / 2);
+    ctx.beginPath();
+    ctx.moveTo(-s * (0.5 + 0.52 * wj), yy);
+    ctx.quadraticCurveTo(0, yy, s * (0.5 + 0.52 * wj), yy);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+/* ---- 地面の反射 ---- */
+function drawReflections() {
+  const gy = GROUND();
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (const l of lanterns) {
+    if (l.glow < 0.02) continue;
+    const b = bob(l);
+    const s = l.size;
+    const dist = gy - b.y;
+    const spread = s * (1.6 + dist / (H * 0.5) * 2.2);
+    const alpha = 0.22 * l.glow * Math.max(0.15, 1 - dist / (H * 0.9));
+    const rg = ctx.createRadialGradient(b.x, gy, 0, b.x, gy, spread);
+    rg.addColorStop(0, rgba(mix(l.hue, C.warmHi, 0.3), alpha));
+    rg.addColorStop(1, rgba(l.hue, 0));
+    ctx.fillStyle = rg;
+    // 楕円で床ににじませる
+    ctx.save();
+    ctx.translate(b.x, gy); ctx.scale(1, 0.32);
+    ctx.beginPath(); ctx.arc(0, 0, spread, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/* ---- ループ ---- */
+function frame(now) {
+  let dt = Math.min(0.033, (now - last) / 1000); last = now;
+  if (!reduced) t += dt;
+  // 物理は小刻みに積分して安定させる
+  const sub = 2;
+  for (let i = 0; i < sub; i++) step(dt / sub);
+
+  // 空
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, rgba(C.top, 1));
+  sky.addColorStop(1, rgba(C.bot, 1));
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  // 地面
+  const gy = GROUND();
+  const gr = ctx.createLinearGradient(0, gy - 20, 0, H);
+  gr.addColorStop(0, rgba(C.bot, 1));
+  gr.addColorStop(0.15, rgba(C.ground, 1));
+  gr.addColorStop(1, rgba(mix(C.ground, [0, 0, 0], 0.2), 1));
+  ctx.fillStyle = gr; ctx.fillRect(0, gy - 20, W, H - gy + 20);
+
+  drawReflections();
+
+  // 提灯(奥→手前は size でおおよそ並ぶ)
+  const sorted = [...lanterns].sort((a, b) => a.size - b.size);
+  for (const l of sorted) drawLantern(l);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

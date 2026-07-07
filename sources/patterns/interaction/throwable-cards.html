@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>投げられるカード</title>
+<meta name="pattern-title" content="投げられるカード">
+<meta name="pattern-desc" content="慣性・摩擦・壁反発で投げ飛ばせるカード群。掴むと最前面へ、衝突でわずかに回転する。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background:
+      radial-gradient(120% 90% at 50% -10%, var(--color-bg-secondary), transparent 60%),
+      var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  #field { position: fixed; inset: 0; }
+  .card {
+    position: absolute; top: 0; left: 0;
+    width: 130px; height: 168px;
+    border-radius: 20px;
+    padding: 16px;
+    box-sizing: border-box;
+    display: flex; flex-direction: column; justify-content: space-between;
+    will-change: transform;
+    border: 1px solid rgba(255,255,255,.35);
+    box-shadow: 0 16px 32px -18px rgba(40,35,25,.55), inset 0 1px 0 rgba(255,255,255,.4);
+    cursor: grab;
+  }
+  .card.drag { cursor: grabbing; }
+  .card .num { font-size: 13px; opacity: .7; }
+  .card .big { font-size: 30px; font-weight: 700; letter-spacing: .02em; }
+  .card .foot { font-size: 12px; opacity: .8; }
+  .hint {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    margin: 0; font-size: 13px; color: var(--color-fg-muted);
+    background: color-mix(in srgb, var(--color-bg-elevated) 70%, transparent);
+    padding: 7px 15px; border-radius: 999px; border: 1px solid var(--color-border-default);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="field"></div>
+  <p class="hint">カードを掴んで投げてください。壁で跳ね返り、ぶつかると少し回ります</p>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const field = document.getElementById("field");
+
+  const PALETTE = [
+    ["#5bbcb1", "#07312d", "涼"], ["#f0a8bd", "#5a2436", "花"], ["#f1d189", "#5a4611", "陽"],
+    ["#bcb2e8", "#2f2a55", "夢"], ["#f3a890", "#5a2b1c", "火"], ["#9fc8ea", "#123049", "空"],
+    ["#a9dcc0", "#134030", "芽"],
+  ];
+
+  const W0 = 130, H0 = 168;
+  const cards = [];
+  let z = 1;
+
+  function bounds() { return { w: innerWidth, h: innerHeight }; }
+
+  PALETTE.forEach((p, i) => {
+    const el = document.createElement("div");
+    el.className = "card";
+    el.style.background = "linear-gradient(150deg, " + p[0] + ", color-mix(in srgb, " + p[0] + " 78%, #ffffff))";
+    el.style.color = p[1];
+    el.innerHTML =
+      '<div class="num">0' + (i + 1) + '</div>' +
+      '<div class="big">' + p[2] + '</div>' +
+      '<div class="foot">throw me</div>';
+    field.appendChild(el);
+    const b = bounds();
+    const c = {
+      el,
+      x: 60 + (i % 4) * 150 + Math.random() * 20,
+      y: 90 + Math.floor(i / 4) * 200 + Math.random() * 20,
+      vx: 0, vy: 0,
+      ang: (Math.random() - 0.5) * 18,
+      va: 0,
+      r: Math.hypot(W0, H0) / 2 * 0.86,   // 衝突用の実効半径（少し小さめ）
+      z: ++z,
+      grabbed: false,
+    };
+    c.x = Math.min(c.x, b.w - W0 - 20);
+    cards.push(c);
+    el.style.zIndex = c.z;
+
+    el.addEventListener("pointerdown", (e) => grab(e, c));
+  });
+
+  // ---- ドラッグ（掴む・投げる）----
+  let active = null, offx = 0, offy = 0;
+  let ptLast = { x: 0, y: 0, t: 0 };
+  let ptVel = { x: 0, y: 0 };
+
+  function grab(e, c) {
+    active = c;
+    c.grabbed = true;
+    c.el.classList.add("drag");
+    c.el.setPointerCapture?.(e.pointerId);
+    c.z = ++z; c.el.style.zIndex = c.z;   // 最前面へ
+    const cx = c.x + W0 / 2, cy = c.y + H0 / 2;
+    offx = e.clientX - cx; offy = e.clientY - cy;
+    c.vx = c.vy = 0;
+    ptLast = { x: e.clientX, y: e.clientY, t: performance.now() };
+    ptVel = { x: 0, y: 0 };
+    e.preventDefault();
+  }
+  addEventListener("pointermove", (e) => {
+    if (!active) return;
+    const cx = e.clientX - offx, cy = e.clientY - offy;
+    active.x = cx - W0 / 2; active.y = cy - H0 / 2;
+    const now = performance.now();
+    const dt = (now - ptLast.t) / 1000;
+    if (dt > 0) {
+      // 平滑化した投げ速度（px/s）
+      ptVel.x = ptVel.x * 0.5 + ((e.clientX - ptLast.x) / dt) * 0.5;
+      ptVel.y = ptVel.y * 0.5 + ((e.clientY - ptLast.y) / dt) * 0.5;
+    }
+    ptLast = { x: e.clientX, y: e.clientY, t: now };
+  }, { passive: false });
+  function release() {
+    if (!active) return;
+    active.vx = clamp(ptVel.x, -2600, 2600);
+    active.vy = clamp(ptVel.y, -2600, 2600);
+    active.va = clamp((ptVel.x) * 0.02, -260, 260);
+    active.grabbed = false;
+    active.el.classList.remove("drag");
+    active = null;
+  }
+  addEventListener("pointerup", release);
+  addEventListener("pointercancel", release);
+
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  // ---- 物理 ----
+  const FRICTION = 1.4;      // 速度減衰（大きいほどよく止まる）
+  const REST = 0.72;         // 壁反発係数
+  const ANG_FRICTION = 2.2;
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    const b = bounds();
+
+    for (const c of cards) {
+      if (c.grabbed) { c.va *= Math.exp(-ANG_FRICTION * dt); continue; }
+      if (reduce) { /* 慣性は残すが減衰を強める */ }
+      // 摩擦（指数減衰）
+      const decay = Math.exp(-FRICTION * dt);
+      c.vx *= decay; c.vy *= decay;
+      c.va *= Math.exp(-ANG_FRICTION * dt);
+      // 積分
+      c.x += c.vx * dt; c.y += c.vy * dt; c.ang += c.va * dt;
+      // 壁反発
+      if (c.x < 0) { c.x = 0; c.vx = Math.abs(c.vx) * REST; c.va += c.vy * 0.01; }
+      if (c.x + W0 > b.w) { c.x = b.w - W0; c.vx = -Math.abs(c.vx) * REST; c.va -= c.vy * 0.01; }
+      if (c.y < 0) { c.y = 0; c.vy = Math.abs(c.vy) * REST; c.va -= c.vx * 0.01; }
+      if (c.y + H0 > b.h) { c.y = b.h - H0; c.vy = -Math.abs(c.vy) * REST; c.va += c.vx * 0.01; }
+      // 微小速度で停止
+      if (Math.hypot(c.vx, c.vy) < 4) { c.vx = 0; c.vy = 0; }
+    }
+
+    // カード同士の衝突（円近似・弾性 + 接線で回転付与）
+    for (let i = 0; i < cards.length; i++) {
+      for (let j = i + 1; j < cards.length; j++) {
+        const a = cards[i], d = cards[j];
+        if (a.grabbed && d.grabbed) continue;
+        const ax = a.x + W0 / 2, ay = a.y + H0 / 2;
+        const bx = d.x + W0 / 2, by = d.y + H0 / 2;
+        let dx = bx - ax, dy = by - ay;
+        let dist = Math.hypot(dx, dy) || 1e-3;
+        const minD = a.r + d.r;
+        if (dist < minD) {
+          const nx = dx / dist, ny = dy / dist;
+          const overlap = minD - dist;
+          // 位置補正（掴んでいる側は動かさない）
+          const aMove = a.grabbed ? 0 : (d.grabbed ? 1 : 0.5);
+          const dMove = d.grabbed ? 0 : (a.grabbed ? 1 : 0.5);
+          a.x -= nx * overlap * aMove; a.y -= ny * overlap * aMove;
+          d.x += nx * overlap * dMove; d.y += ny * overlap * dMove;
+          // 相対速度の法線成分を交換（等質量・反発）
+          const rvx = d.vx - a.vx, rvy = d.vy - a.vy;
+          const vn = rvx * nx + rvy * ny;
+          if (vn < 0) {
+            const imp = -(1 + 0.6) * vn / 2;
+            const ix = imp * nx, iy = imp * ny;
+            if (!a.grabbed) { a.vx -= ix; a.vy -= iy; }
+            if (!d.grabbed) { d.vx += ix; d.vy += iy; }
+            // 接線成分でわずかに回転
+            const tvx = rvx - vn * nx, tvy = rvy - vn * ny;
+            const spin = (tvx * ny - tvy * nx) * 0.05;
+            if (!a.grabbed) a.va -= spin;
+            if (!d.grabbed) d.va += spin;
+          }
+        }
+      }
+    }
+
+    for (const c of cards) {
+      c.el.style.transform =
+        "translate3d(" + c.x.toFixed(2) + "px," + c.y.toFixed(2) + "px,0) rotate(" + c.ang.toFixed(2) + "deg)";
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  addEventListener("resize", () => {
+    const b = bounds();
+    for (const c of cards) {
+      c.x = clamp(c.x, 0, Math.max(0, b.w - W0));
+      c.y = clamp(c.y, 0, Math.max(0, b.h - H0));
+    }
+  });
+
+  // 見た目のパステルは固定だが、属性変化を監視（仕様準拠）。背景/文字は CSS 変数で追従。
+  new MutationObserver(() => {}).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+})();
+</script>
+</body>
+</html>

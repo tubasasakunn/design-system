@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ばねモーダル">
+<meta name="pattern-desc" content="オーバーシュートするばね補間で出現するモーダル。背景はぼかし＋暗幕、下へドラッグして速度で閉じる。">
+<title>ばねモーダル</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+  .stage { text-align: center; max-width: 460px; }
+  .stage .eyebrow {
+    font-size: .72rem; letter-spacing: .3em; text-transform: uppercase;
+    color: var(--color-fg-muted);
+  }
+  .stage h1 { margin-top: 12px; font-size: 1.5rem; font-weight: 620; }
+  .stage p { margin-top: 14px; color: var(--color-fg-secondary); line-height: 1.8; font-size: .93rem; }
+  .open-btn {
+    margin-top: 26px;
+    font: inherit; font-size: .95rem; font-weight: 560;
+    color: var(--color-accent-fg);
+    background: var(--color-accent-default);
+    border: none; border-radius: 999px;
+    padding: .8em 1.7em;
+    cursor: pointer;
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--color-accent-default) 40%, transparent);
+    transition: background .25s ease, transform .12s ease;
+  }
+  .open-btn:hover { background: var(--color-accent-hover); }
+  .open-btn:active { transform: scale(.97); }
+
+  .scrim {
+    position: fixed; inset: 0;
+    z-index: 100;
+    display: grid; place-items: end center;
+    padding: 0 20px;
+    background: rgba(28,24,18,0);
+    backdrop-filter: blur(0px);
+    -webkit-backdrop-filter: blur(0px);
+    pointer-events: none;
+    visibility: hidden;
+  }
+  .scrim.live { pointer-events: auto; visibility: visible; }
+  .sheet {
+    width: min(440px, 100%);
+    margin-bottom: max(24px, env(safe-area-inset-bottom));
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    border-radius: 26px;
+    padding: 14px 24px 26px;
+    box-shadow: 0 24px 60px rgba(30,25,18,.28);
+    will-change: transform;
+    touch-action: none;
+  }
+  .grabber {
+    width: 44px; height: 5px; border-radius: 999px;
+    background: var(--color-border-strong);
+    margin: 2px auto 18px;
+    cursor: grab;
+  }
+  .sheet.dragging .grabber { cursor: grabbing; }
+  .sheet h2 { font-size: 1.2rem; font-weight: 620; }
+  .sheet .body { margin-top: 12px; color: var(--color-fg-secondary); line-height: 1.85; font-size: .93rem; }
+  .sheet .body p + p { margin-top: 10px; }
+  .row { margin-top: 22px; display: flex; gap: 10px; }
+  .row button {
+    flex: 1; font: inherit; font-size: .9rem; font-weight: 540;
+    padding: .78em 1em; border-radius: 16px; cursor: pointer;
+    border: 1px solid var(--color-border-default);
+    background: var(--color-bg-secondary);
+    color: var(--color-fg-primary);
+    transition: transform .12s ease;
+  }
+  .row button:active { transform: scale(.97); }
+  .row button.primary {
+    border: none;
+    background: var(--color-accent-default);
+    color: var(--color-accent-fg);
+  }
+  .hint { margin-top: 16px; text-align: center; font-size: .76rem; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="eyebrow">design system</div>
+  <h1>ばねで、そっと現れる</h1>
+  <p>ボタンを押すとシートが下からオーバーシュートしながら立ち上がります。下へドラッグして手を離すと、勢いに応じて閉じます。</p>
+  <button class="open-btn" id="open">シートを開く</button>
+</div>
+
+<div class="scrim" id="scrim">
+  <div class="sheet" id="sheet">
+    <div class="grabber"></div>
+    <h2>この見え方を採用しますか？</h2>
+    <div class="body">
+      <p>選んだテーマとアイコンスタイルは原本に記録され、Web と Swift の両方へ生成されます。</p>
+      <p>いつでも別の好みに切り替えられます。ひとつの正解に決めなくて大丈夫。</p>
+    </div>
+    <div class="row">
+      <button id="cancel">あとで</button>
+      <button class="primary" id="confirm">採用する</button>
+    </div>
+    <div class="hint">下へスワイプでも閉じられます</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const scrim = document.getElementById("scrim");
+  const sheet = document.getElementById("sheet");
+  const openBtn = document.getElementById("open");
+
+  let sheetH = 0;
+  // ばね: 現在 y と目標 y。y=0 は所定位置、y=sheetH+余白 は画面外。
+  const s = { y: 0, v: 0, target: 0 };
+  const K = 200, DAMP = 20;   // 剛性・減衰（軽いオーバーシュートが出る値）
+  let raf = 0, last = 0;
+  let isOpen = false;
+
+  // ドラッグ状態
+  let dragging = false, startY = 0, startOffset = 0, pointerId = null;
+  let lastMoveY = 0, lastMoveT = 0, dragV = 0;
+
+  function measure() { sheetH = sheet.getBoundingClientRect().height; }
+
+  function apply() {
+    const dim = Math.max(0, 1 - s.y / (sheetH + 60));   // 0..1 出現度
+    sheet.style.transform = `translateY(${s.y.toFixed(2)}px)`;
+    scrim.style.background = `rgba(28,24,18,${(0.34 * dim).toFixed(3)})`;
+    const blur = (10 * dim).toFixed(2);
+    scrim.style.backdropFilter = `blur(${blur}px)`;
+    scrim.style.webkitBackdropFilter = `blur(${blur}px)`;
+  }
+
+  function loop(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    const a = K * (s.target - s.y) - DAMP * s.v;
+    s.v += a * dt;
+    s.y += s.v * dt;
+    apply();
+    const settled = Math.abs(s.target - s.y) < 0.3 && Math.abs(s.v) < 0.3;
+    if (settled) {
+      s.y = s.target; s.v = 0; apply();
+      raf = 0;
+      if (s.target > 0.1) finishClose();
+      return;
+    }
+    raf = requestAnimationFrame(loop);
+  }
+  function startSpring() {
+    if (rm.matches) { s.y = s.target; s.v = 0; apply(); if (s.target > 0.1) finishClose(); return; }
+    last = performance.now();
+    if (!raf) raf = requestAnimationFrame(loop);
+  }
+
+  function openModal() {
+    scrim.classList.add("live");
+    measure();
+    s.y = sheetH + 80; s.v = 0; s.target = 0;
+    apply();
+    isOpen = true;
+    startSpring();
+    document.addEventListener("keydown", onKey);
+  }
+  function closeModal(velocity) {
+    s.target = sheetH + 80;
+    if (velocity) s.v = Math.max(s.v, velocity);
+    startSpring();
+  }
+  function finishClose() {
+    scrim.classList.remove("live");
+    isOpen = false;
+    document.removeEventListener("keydown", onKey);
+    openBtn.focus();
+  }
+
+  function onKey(e) { if (e.key === "Escape") closeModal(0); }
+
+  openBtn.addEventListener("click", openModal);
+  document.getElementById("cancel").addEventListener("click", () => closeModal(0));
+  document.getElementById("confirm").addEventListener("click", () => closeModal(0));
+  scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) closeModal(0); });
+
+  // ---- ドラッグ ----
+  sheet.addEventListener("pointerdown", (e) => {
+    if (!isOpen) return;
+    dragging = true; pointerId = e.pointerId;
+    sheet.setPointerCapture(pointerId);
+    sheet.classList.add("dragging");
+    startY = e.clientY; startOffset = s.y;
+    lastMoveY = e.clientY; lastMoveT = performance.now(); dragV = 0;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    s.v = 0;
+  });
+  sheet.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    let dy = e.clientY - startY;
+    let y = startOffset + dy;
+    if (y < 0) y = -Math.sqrt(-y) * 3;   // 上方向はゴム
+    s.y = y;
+    apply();
+    const now = performance.now(), dt = (now - lastMoveT) / 1000;
+    if (dt > 0) dragV = (e.clientY - lastMoveY) / dt;   // px/s
+    lastMoveY = e.clientY; lastMoveT = now;
+  });
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    sheet.classList.remove("dragging");
+    try { sheet.releasePointerCapture(pointerId); } catch {}
+    // 速度 or 距離で判定
+    const past = s.y > sheetH * 0.4;
+    const flung = dragV > 900;
+    if (flung || past) closeModal(Math.max(dragV, 300));
+    else { s.target = 0; s.v = dragV; startSpring(); }
+  }
+  sheet.addEventListener("pointerup", endDrag);
+  sheet.addEventListener("pointercancel", endDrag);
+
+  window.addEventListener("resize", () => { if (isOpen) measure(); });
+})();
+</script>
+</body>
+</html>

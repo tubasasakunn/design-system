@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>渦巻銀河</title>
+<meta name="pattern-title" content="渦巻銀河">
+<meta name="pattern-desc" content="差動回転する渦状腕の星々。ドラッグで円盤を傾けると擬似3Dに見え、星色は温度で淡く変わる。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; display: block; touch-action: none; cursor: grab; }
+  #stage.drag { cursor: grabbing; }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .04em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hint">ドラッグで円盤を傾ける / 中心ほど速く回る</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d");
+  const root = document.documentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+  let COL = {};
+  function readColors() {
+    COL = {
+      bg:     token("--color-bg-primary", "#faf7f1"),
+      ink:    token("--color-fg-primary", "#2c2a26"),
+      soft:   token("--color-fg-secondary", "#6c655b"),
+      muted:  token("--color-fg-muted", "#a79f91"),
+      accent: token("--color-accent-default", "#5bbcb1"),
+      warm:   token("--color-status-warning", "#f0a830"),
+      hot:    token("--color-status-error", "#ef5b5b"),
+    };
+  }
+  readColors();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  function hex(c) {
+    c = c.replace("#", "");
+    if (c.length === 3) c = c.split("").map(x => x + x).join("");
+    return [parseInt(c.slice(0,2),16), parseInt(c.slice(2,4),16), parseInt(c.slice(4,6),16)];
+  }
+  function mix(a, b, t) {
+    return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+  }
+
+  let W = 0, H = 0, DPR = 1, R = 1;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    R = Math.min(W, H) * 0.42;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  // 星: 極座標(半径 rad 0..1, 角 ang)。腕に沿って配置、差動回転で角速度は半径依存
+  const stars = [];
+  const ARMS = 2;
+  const TWIST = 3.4;    // 腕の巻き
+  function initStars() {
+    stars.length = 0;
+    const N = reduce.matches ? 900 : 2600;
+    for (let i = 0; i < N; i++) {
+      // 中心集中の半径分布
+      const rad = Math.pow(Math.random(), 0.7);
+      const arm = (i % ARMS) * (Math.PI * 2 / ARMS);
+      // 腕に沿った基準角 + 腕からの散らばり（内側ほど広がる=バルジ）
+      const spread = (1 - rad) * 0.9 + 0.06;
+      const jitter = (Math.random() - 0.5) * spread + (Math.random() - 0.5) * 0.12;
+      const ang = arm + rad * TWIST + jitter;
+      // 温度: 中心(古い星=黄)〜外周(若い星=青緑)、ばらつきあり
+      const temp = Math.min(1, Math.max(0, rad + (Math.random() - 0.5) * 0.5));
+      stars.push({
+        rad, ang,
+        z: (Math.random() - 0.5) * 0.05, // 円盤の厚み
+        temp,
+        size: 0.5 + Math.random() * 1.4 + (1 - rad) * 0.8,
+        tw: Math.random() * Math.PI * 2, // またたき位相
+      });
+    }
+    // 明るい星が手前に来るよう半径でソート（描画順）
+    stars.sort((a, b) => b.rad - a.rad);
+  }
+
+  // 傾き（tiltX: 前後の傾き）とスピン基準
+  let tiltX = 0.55, targetTilt = 0.55;
+  let spin = 0;              // ドラッグ横方向で回転位相を回す
+  let targetSpinVel = 0;
+
+  let dragging = false, lastPX = 0, lastPY = 0;
+  function down(e) {
+    dragging = true; canvas.classList.add("drag");
+    lastPX = e.clientX; lastPY = e.clientY;
+    canvas.setPointerCapture?.(e.pointerId);
+  }
+  function move(e) {
+    if (!dragging) return;
+    const dx = e.clientX - lastPX, dy = e.clientY - lastPY;
+    lastPX = e.clientX; lastPY = e.clientY;
+    targetTilt = Math.min(0.98, Math.max(0.08, targetTilt - dy * 0.004));
+    targetSpinVel = dx * 0.01;
+  }
+  function up() { dragging = false; canvas.classList.remove("drag"); targetSpinVel = 0; }
+  canvas.addEventListener("pointerdown", down);
+  canvas.addEventListener("pointermove", move);
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
+
+  const hotC = () => hex(COL.warm);
+  let last = performance.now();
+
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    tiltX += (targetTilt - tiltX) * (1 - Math.exp(-6 * dt));
+    // ドラッグ回転 + 慣性、離すと 0 へ
+    spinVel += (targetSpinVel - spinVel) * (1 - Math.exp(-5 * dt));
+    spin += spinVel;
+
+    const cx = W / 2, cy = H / 2;
+    const cosT = tiltX;                 // y 方向の圧縮率（傾き）
+    const persp = 0.35;                 // 擬似遠近: 奥ほど小さく
+
+    // 生成り背景 + 中心のやわらかいバルジ光
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const bulge = ctx.createRadialGradient(cx, cy, 2, cx, cy, R * 0.6);
+    const wc = hex(COL.warm);
+    bulge.addColorStop(0, `rgba(${wc[0]},${wc[1]},${wc[2]},0.22)`);
+    bulge.addColorStop(1, `rgba(${wc[0]},${wc[1]},${wc[2]},0)`);
+    ctx.fillStyle = bulge;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, R * 0.6, R * 0.6 * cosT, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const inkC = hex(COL.ink), accC = hex(COL.accent), softC = hex(COL.soft), hotc = hex(COL.hot);
+    const globalSpeed = reduce.matches ? 0 : 1;
+
+    ctx.globalCompositeOperation = "source-over";
+    for (const s of stars) {
+      // 差動回転: 角速度は中心ほど大きい（オメガ ∝ 1/(rad+k)）
+      s.ang += (0.16 / (s.rad + 0.12)) * dt * globalSpeed;
+
+      const a = s.ang + spin;
+      const rr = s.rad * R;
+      // 円盤平面上の座標 → 傾けて投影（y を cosT で圧縮、z を厚みに）
+      const lx = Math.cos(a) * rr;
+      const ly = Math.sin(a) * rr;
+      const depth = Math.sin(a) ;         // 奥行き手掛かり（-1 奥 .. 1 手前）
+      const px = cx + lx;
+      const py = cy + ly * cosT + s.z * R * (1 - cosT) ;
+
+      // 擬似遠近スケール（手前を少し大きく）
+      const sc = 1 + depth * persp * (1 - cosT);
+      let size = s.size * sc;
+      if (size < 0.2) size = 0.2;
+
+      // 温度→色: 内側=warm/hot、外周=accent、中間=soft
+      let col;
+      if (s.temp < 0.4) col = mix(hotc, wc, s.temp / 0.4);
+      else if (s.temp < 0.75) col = mix(wc, softC, (s.temp - 0.4) / 0.35);
+      else col = mix(softC, accC, (s.temp - 0.75) / 0.25);
+
+      // またたき
+      s.tw += dt * 3 * globalSpeed;
+      const twk = 0.82 + 0.18 * Math.sin(s.tw);
+      // 奥の星はわずかに暗く（円盤の裏）
+      const dim = 0.6 + 0.4 * (depth * 0.5 + 0.5);
+      const alpha = Math.min(1, (0.45 + (1 - s.rad) * 0.5) * twk * dim);
+
+      ctx.fillStyle = `rgb(${col[0]|0},${col[1]|0},${col[2]|0})`;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(px, py, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(frame);
+  }
+
+  let spinVel = 0;
+  window.addEventListener("resize", () => { resize(); initStars(); });
+  resize();
+  initStars();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

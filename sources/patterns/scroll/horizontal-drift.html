@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="横流れギャラリー">
+<meta name="pattern-desc" content="縦スクロールを横移動に変え、スクロールの速さでカードがわずかに傾き、止まると静かに戻る回廊。">
+<title>横流れギャラリー</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--color-bg-primary); color: var(--color-fg-primary); font-family: system-ui, sans-serif; }
+  .track { height: 620vh; }
+  .stage { position: fixed; inset: 0; overflow: hidden; display: flex; align-items: center; }
+  .row { display: flex; gap: clamp(28px, 4vw, 56px); padding: 0 max(8vw, calc(50vw - 190px)); will-change: transform; }
+
+  .card {
+    position: relative; flex: 0 0 auto;
+    width: clamp(240px, 34vw, 380px); height: clamp(320px, 62vh, 500px);
+    border-radius: 26px; overflow: hidden;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 18px 40px -22px rgba(40, 35, 25, .35);
+    transform-origin: 50% 120%;
+    will-change: transform;
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  .card .wash { position: absolute; inset: 0; opacity: .5; }
+  .card .glow { position: absolute; inset: -40% -20% auto -20%; height: 70%; filter: blur(30px); opacity: .55; }
+  .card .no { position: absolute; top: 22px; left: 24px; font-size: .74rem; letter-spacing: .3em; color: var(--color-fg-secondary); font-weight: 600; }
+  .card .art { position: absolute; inset: 0; }
+  .card .meta { position: relative; padding: 24px; background: linear-gradient(to top, color-mix(in srgb, var(--color-bg-elevated) 92%, transparent), transparent); }
+  .card .ttl { font-size: 1.25rem; font-weight: 300; letter-spacing: .04em; }
+  .card .sub { margin-top: 6px; font-size: .78rem; line-height: 1.6; color: var(--color-fg-muted); }
+
+  .head { position: fixed; left: 7vw; top: 7vh; z-index: 4; pointer-events: none; }
+  .head h1 { font-size: 1.02rem; font-weight: 600; letter-spacing: .12em; }
+  .head p { margin-top: 6px; font-size: .76rem; letter-spacing: .1em; color: var(--color-fg-muted); }
+
+  .dots { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); z-index: 4; display: flex; gap: 12px; pointer-events: none; }
+  .dots b { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-strong); transition: width .4s cubic-bezier(.4,0,.2,1), background .4s; }
+  .dots b.on { width: 26px; border-radius: 5px; background: var(--color-accent-default); }
+</style>
+</head>
+<body>
+<div class="track" aria-hidden="true"></div>
+<div class="stage"><div class="row" id="row"></div></div>
+<div class="head"><h1>横流れの回廊</h1><p>スクロールで横へ流れます</p></div>
+<div class="dots" id="dots"></div>
+<script>
+(() => {
+  "use strict";
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const smooth = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+
+  const PASTEL = ["#5bbcb1", "#f0a8bd", "#f1d189", "#bcb2e8", "#f3a890", "#9fc8ea", "#a9dcc0"];
+  const CARDS = [
+    { ttl: "波打ち際", sub: "満ちては引く、白い泡の記憶" },
+    { ttl: "花の霞", sub: "淡く煙る春の光" },
+    { ttl: "琥珀の午後", sub: "傾いた陽が長い影を落とす" },
+    { ttl: "藤棚の下", sub: "紫がゆれる涼やかな回廊" },
+    { ttl: "夕凪", sub: "空と海がひとつに溶ける刻" },
+    { ttl: "遠い空", sub: "澄んだ水色のどこまでも" },
+    { ttl: "若葉の風", sub: "みずみずしい緑のそよぎ" },
+  ];
+
+  const row = document.getElementById("row");
+  const cards = CARDS.map((c, i) => {
+    const el = document.createElement("div"); el.className = "card";
+    const tint = PASTEL[i % PASTEL.length];
+    el.innerHTML =
+      `<div class="wash" style="background:radial-gradient(120% 90% at 30% 10%, ${tint}, transparent 70%)"></div>` +
+      `<div class="glow" style="background:${tint}"></div>` +
+      `<div class="no">${String(i + 1).padStart(2, "0")} / ${String(CARDS.length).padStart(2, "0")}</div>` +
+      `<canvas class="art"></canvas>` +
+      `<div class="meta"><div class="ttl">${c.ttl}</div><div class="sub">${c.sub}</div></div>`;
+    row.appendChild(el);
+    return { el, tint, canvas: el.querySelector(".art") };
+  });
+
+  // 各カードの小さな生成アート（決定的なパステルの層）
+  function paintArt(card, idx) {
+    const cv = card.canvas, ctx = cv.getContext("2d");
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const r = cv.getBoundingClientRect();
+    if (r.width < 2) return;
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, r.width, r.height);
+    let seed = (idx + 1) * 2654435761 >>> 0;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    // 幾つかの重なる曲線の帯
+    for (let l = 0; l < 5; l++) {
+      const y = r.height * (0.3 + l * 0.14);
+      ctx.beginPath(); ctx.moveTo(0, y + (rnd() - 0.5) * 40);
+      const c1 = r.width * 0.35, c2 = r.width * 0.7;
+      ctx.bezierCurveTo(c1, y - 60 + rnd() * 120, c2, y - 60 + rnd() * 120, r.width, y + (rnd() - 0.5) * 40);
+      ctx.lineTo(r.width, r.height); ctx.lineTo(0, r.height); ctx.closePath();
+      ctx.fillStyle = card.tint; ctx.globalAlpha = 0.1 + l * 0.03; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  const dotsWrap = document.getElementById("dots");
+  const dotEls = CARDS.map(() => { const b = document.createElement("b"); dotsWrap.appendChild(b); return b; });
+
+  // ---- スクロール → 横移動量 ----
+  let progress = 0, shown = 0, maxShift = 0;
+  function measure() {
+    // row 全幅が画面内を通り切る距離
+    maxShift = Math.max(0, row.scrollWidth - innerWidth);
+    cards.forEach(paintArt);
+  }
+  const readScroll = () => {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    progress = max > 0 ? clamp(scrollY / max, 0, 1) : 0;
+  };
+  addEventListener("scroll", readScroll, { passive: true });
+  addEventListener("resize", () => { measure(); readScroll(); });
+  // レイアウト確定後に計測
+  requestAnimationFrame(() => { measure(); readScroll(); });
+  readScroll();
+
+  // 速度（傾きの元）: 表示中シフトの前フレーム差分を平滑化し、静止で 0 へ減衰
+  let vel = 0, prevShift = 0;
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    shown += (progress - shown) * (1 - Math.exp(-dt * 8));   // 追従イージング
+    const shift = shown * maxShift;
+    row.style.transform = `translate3d(${(-shift).toFixed(2)}px,0,0)`;
+
+    // 速度 = シフト差 / dt（px/s）を平滑化
+    const inst = dt > 0 ? (shift - prevShift) / dt : 0;
+    prevShift = shift;
+    vel += (inst - vel) * (1 - Math.exp(-dt * 10));
+    const tilt = rm.matches ? 0 : clamp(vel * 0.012, -14, 14);   // 度
+    const skew = rm.matches ? 0 : clamp(vel * 0.004, -5, 5);
+
+    const center = innerWidth / 2;
+    for (let i = 0; i < cards.length; i++) {
+      const el = cards[i].el;
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const d = (cx - center) / innerWidth;                     // -1..1 中心からの距離
+      const near = clamp(1 - Math.abs(d) * 1.6, 0, 1);
+      const scale = 0.9 + smooth(near) * 0.12;
+      const lift = -smooth(near) * 22;
+      const depthTilt = d * -6;                                 // 遠近の傾き
+      el.style.transform = `translateY(${lift.toFixed(1)}px) rotateZ(${(tilt + depthTilt).toFixed(2)}deg) skewY(${skew.toFixed(2)}deg) scale(${scale.toFixed(3)})`;
+      el.style.zIndex = String(1000 - Math.round(Math.abs(d) * 100));
+      el.style.opacity = (0.55 + smooth(near) * 0.45).toFixed(3);
+    }
+
+    // どのカードが中心か（進捗ドット）
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < cards.length; i++) {
+      const r = cards[i].el.getBoundingClientRect();
+      const d = Math.abs(r.left + r.width / 2 - center);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    for (let i = 0; i < dotEls.length; i++) dotEls[i].classList.toggle("on", i === best);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

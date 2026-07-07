@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ぱちんこ</title>
+<meta name="pattern-title" content="ぱちんこ">
+<meta name="pattern-desc" content="玉を引くと軌道予測の点線が出て、放つと重力で飛び的に当たる。的は倒れて起き上がり、スコアが増える。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    min-height: 100dvh;
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100dvh; }
+  .score {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    font-variant-numeric: tabular-nums; font-size: 15px; letter-spacing:.05em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 88%, transparent);
+    border: 1px solid var(--color-border-default);
+    padding: 7px 16px; border-radius: 999px; pointer-events:none;
+  }
+  .score b { color: var(--color-accent-default); font-size: 17px; }
+  .hud { position: fixed; left:0; right:0; bottom:22px; text-align:center; pointer-events:none; }
+  .hud h1 { font-size: clamp(18px,3.6vw,26px); font-weight:600; letter-spacing:.04em; margin:0 0 6px; }
+  .hud p { margin:0; font-size:13px; line-height:1.7; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div class="score" id="score">スコア <b>0</b> ・ 命中 0</div>
+  <div class="hud">
+    <h1>ぱちんこ</h1>
+    <p>左下の玉を引いて放ちます。点線は予測軌道。的に当てましょう。</p>
+  </div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const root = document.documentElement;
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const scoreEl = document.getElementById("score");
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+
+  let C={};
+  function readColors(){
+    C = {
+      accent: token("--color-accent-default","#5bbcb1"),
+      accentH: token("--color-accent-hover","#46a89d"),
+      ink: token("--color-accent-fg","#07312d"),
+      band: token("--color-border-strong","#ddd5c6"),
+      fg: token("--color-fg-secondary","#6c655b"),
+      muted: token("--color-fg-muted","#a79f91"),
+      elev: token("--color-bg-elevated","#fffdf9"),
+      warn: token("--color-status-warning","#f0a830"),
+      ok: token("--color-status-success","#2fae6e"),
+    };
+  }
+  readColors();
+
+  const G = 1500;         // 重力 px/s^2
+  const POWER = 6.2;      // 引き量→初速の倍率
+  const BALL_R = 16;
+
+  let W=0,H=0,dpr=1, anchor, ground, targets=[];
+  function layout() {
+    dpr = Math.min(2, devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight;
+    cv.width = W*dpr; cv.height = H*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ground = H - Math.max(70, H*0.12);
+    anchor = { x: Math.min(W*0.2, 170), y: ground - 90 };
+    // 的を配置（右側）
+    targets = [];
+    const n = W < 620 ? 3 : 4;
+    for (let i=0;i<n;i++){
+      const tx = W*0.5 + i*Math.min(120, (W*0.45)/n);
+      targets.push({ x: tx, base: ground, w: 34, h: 78, angle:0, vang:0, down:false, downT:0, flash:0 });
+    }
+    if (state==="idle" && !ball.flying) resetBall();
+  }
+
+  const ball = { x:0, y:0, vx:0, vy:0, flying:false };
+  function resetBall(){ ball.x=anchor.x; ball.y=anchor.y; ball.vx=0; ball.vy=0; ball.flying=false; }
+
+  let state = "idle";     // idle | aim | fly
+  let dragX=0, dragY=0, pid=null;
+  let shots=0, hits=0, score=0;
+
+  cv.addEventListener("pointerdown",(e)=>{
+    if (state!=="idle" || ball.flying) return;
+    if (Math.hypot(e.clientX-ball.x, e.clientY-ball.y) < 48) {
+      state="aim"; pid=e.pointerId; cv.setPointerCapture(pid);
+      dragX=e.clientX; dragY=e.clientY;
+    }
+  });
+  cv.addEventListener("pointermove",(e)=>{
+    if (state!=="aim"||e.pointerId!==pid) return;
+    dragX=e.clientX; dragY=e.clientY;
+    // 引きは玉位置。アンカーからの最大引きを制限
+    let dx=dragX-anchor.x, dy=dragY-anchor.y;
+    const d=Math.hypot(dx,dy), MAX=190;
+    if (d>MAX){ dx*=MAX/d; dy*=MAX/d; }
+    ball.x=anchor.x+dx; ball.y=anchor.y+dy;
+  });
+  function launch(){
+    if (state!=="aim") return;
+    const dx=anchor.x-ball.x, dy=anchor.y-ball.y;
+    ball.vx=dx*POWER; ball.vy=dy*POWER;
+    ball.flying=true; state="fly"; shots++; updateScore();
+  }
+  cv.addEventListener("pointerup", launch);
+  cv.addEventListener("pointercancel", ()=>{ if(state==="aim"){ state="idle"; resetBall(); } });
+
+  function updateScore(){ scoreEl.innerHTML = "スコア <b>"+score+"</b> ・ 命中 "+hits+"/"+shots; }
+
+  // 予測軌道: 現在の引きから初速を計算し、簡易積分でサンプル
+  function predict() {
+    const dx=anchor.x-ball.x, dy=anchor.y-ball.y;
+    let x=ball.x, y=ball.y, vx=dx*POWER, vy=dy*POWER;
+    const pts=[]; const h=1/60;
+    for (let i=0;i<130;i++){
+      vy += G*h; x += vx*h; y += vy*h;
+      if (y>ground+40) break;
+      if (i%4===0) pts.push([x,y]);
+    }
+    return pts;
+  }
+
+  function hitTarget(tg){
+    // 玉の中心が的の矩形（回転前の近似）に入るか
+    if (tg.down) return false;
+    const halfW = tg.w/2 + BALL_R*0.7;
+    const top = tg.base - tg.h - BALL_R*0.5;
+    return ball.x > tg.x-halfW && ball.x < tg.x+halfW && ball.y > top && ball.y < tg.base+BALL_R*0.3;
+  }
+
+  let last = performance.now();
+  function frame(now){
+    let dt=(now-last)/1000; last=now;
+    if (dt>0.05) dt=0.05;
+
+    if (state==="fly"){
+      const steps=3, h=dt/steps;
+      for (let s=0;s<steps;s++){
+        ball.vy += G*h; ball.x += ball.vx*h; ball.y += ball.vy*h;
+        for (const tg of targets){
+          if (hitTarget(tg)){
+            tg.down=true; tg.downT=0; tg.vang = (ball.vx>0?1:-1)*6 + (Math.random()*1-0.5);
+            tg.flash=1; hits++; score += 100;
+            // 玉は少し勢いを失って弾む
+            ball.vx*=0.35; ball.vy = -Math.abs(ball.vy)*0.3 - 120;
+            updateScore();
+          }
+        }
+      }
+      // 地面バウンド
+      if (ball.y > ground - BALL_R){
+        ball.y = ground - BALL_R; ball.vy *= -0.42; ball.vx *= 0.7;
+        if (Math.abs(ball.vy) < 60) ball.vy = 0;
+      }
+      // 停止 or 画面外 → リセット
+      const stopped = ball.y >= ground - BALL_R - 0.5 && Math.abs(ball.vy) < 30 && Math.abs(ball.vx) < 12;
+      if (stopped || ball.x > W+80 || ball.x < -80 || ball.y > H+120){
+        state="idle"; resetBall();
+      }
+    }
+
+    // 的の物理: 倒れる→少し待つ→減衰振動で起き上がる
+    for (const tg of targets){
+      if (tg.flash>0) tg.flash = Math.max(0, tg.flash - dt*2.5);
+      if (tg.down){
+        tg.downT += dt;
+        if (reduce){ tg.angle = 0; tg.vang=0; if (tg.downT>0.4) tg.down=false; }
+        else {
+          // 倒れきってから起き上がる
+          const targetAng = tg.downT < 0.75 ? (tg.vang>0?1:-1)*1.15 : 0;
+          const k = 90, damp = 9;
+          const a = k*(targetAng - tg.angle) - damp*tg.vang;
+          tg.vang += a*dt; tg.angle += tg.vang*dt;
+          if (tg.downT>0.75 && Math.abs(tg.angle)<0.02 && Math.abs(tg.vang)<0.1){ tg.angle=0; tg.vang=0; tg.down=false; }
+        }
+      } else {
+        // 微揺れ減衰
+        if (!reduce && Math.abs(tg.angle)>0.001){
+          const a = -80*tg.angle - 8*tg.vang; tg.vang+=a*dt; tg.angle+=tg.vang*dt;
+        } else { tg.angle=0; tg.vang=0; }
+      }
+    }
+
+    draw(now/1000);
+    requestAnimationFrame(frame);
+  }
+
+  function draw(t){
+    ctx.clearRect(0,0,W,H);
+
+    // 地面
+    ctx.fillStyle = C.band;
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(0, ground+BALL_R, W, H-ground);
+    ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(0,ground+BALL_R); ctx.lineTo(W,ground+BALL_R);
+    ctx.strokeStyle = C.band; ctx.lineWidth=2; ctx.stroke();
+
+    // 的
+    for (const tg of targets){
+      ctx.save();
+      ctx.translate(tg.x, tg.base);
+      ctx.rotate(tg.angle);
+      const w=tg.w, h=tg.h, r=10;
+      ctx.beginPath();
+      ctx.moveTo(-w/2, 0);
+      ctx.lineTo(-w/2, -h+r); ctx.arcTo(-w/2,-h, -w/2+r,-h, r);
+      ctx.lineTo(w/2-r,-h); ctx.arcTo(w/2,-h, w/2,-h+r, r);
+      ctx.lineTo(w/2, 0); ctx.closePath();
+      ctx.fillStyle = tg.flash>0 ? C.ok : C.elev;
+      ctx.strokeStyle = tg.flash>0 ? C.ok : C.band;
+      ctx.lineWidth=2; ctx.fill(); ctx.stroke();
+      // 的マーク（同心円）
+      ctx.beginPath(); ctx.arc(0,-h*0.55,10,0,Math.PI*2);
+      ctx.fillStyle = C.accent; ctx.fill();
+      ctx.beginPath(); ctx.arc(0,-h*0.55,5,0,Math.PI*2);
+      ctx.fillStyle = C.elev; ctx.fill();
+      ctx.restore();
+    }
+
+    // パチンコの支柱（Y字）＋ゴム
+    ctx.strokeStyle = C.fg; ctx.lineWidth=6; ctx.lineCap="round";
+    ctx.beginPath(); ctx.moveTo(anchor.x, ground); ctx.lineTo(anchor.x, anchor.y+18); ctx.stroke();
+    const forkY = anchor.y - 4;
+    const fork1={x:anchor.x-26,y:forkY-6}, fork2={x:anchor.x+26,y:forkY-6};
+    ctx.beginPath(); ctx.moveTo(anchor.x,anchor.y+18); ctx.lineTo(fork1.x,fork1.y);
+    ctx.moveTo(anchor.x,anchor.y+18); ctx.lineTo(fork2.x,fork2.y); ctx.stroke();
+
+    // 予測軌道（狙い中）
+    if (state==="aim"){
+      const pts=predict();
+      ctx.fillStyle = C.accent;
+      for (let i=0;i<pts.length;i++){
+        const a = 1 - i/pts.length;
+        ctx.globalAlpha = 0.15 + 0.55*a;
+        ctx.beginPath(); ctx.arc(pts[i][0], pts[i][1], 3.2*a+1.4, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha=1;
+      // 引きゴム
+      ctx.strokeStyle=C.accentH; ctx.lineWidth=4;
+      ctx.beginPath(); ctx.moveTo(fork1.x,fork1.y); ctx.lineTo(ball.x,ball.y); ctx.lineTo(fork2.x,fork2.y); ctx.stroke();
+    } else if (!ball.flying){
+      // 待機ゴム
+      ctx.strokeStyle=C.band; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(fork1.x,fork1.y); ctx.lineTo(ball.x,ball.y); ctx.lineTo(fork2.x,fork2.y); ctx.stroke();
+    }
+
+    // 玉
+    const g = ctx.createRadialGradient(ball.x-5,ball.y-6,2, ball.x,ball.y,BALL_R+2);
+    g.addColorStop(0,"rgba(255,255,255,.9)"); g.addColorStop(.5,C.accent); g.addColorStop(1,C.accentH);
+    ctx.beginPath(); ctx.arc(ball.x,ball.y,BALL_R,0,Math.PI*2);
+    ctx.fillStyle=g; ctx.shadowColor="rgba(40,35,25,.28)"; ctx.shadowBlur=12; ctx.shadowOffsetY=5;
+    ctx.fill(); ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+  }
+
+  layout();
+  addEventListener("resize", layout);
+  requestAnimationFrame(frame);
+  updateScore();
+  new MutationObserver(readColors).observe(root, { attributes:true, attributeFilter:["data-theme","data-appearance"] });
+})();
+</script>
+</body>
+</html>

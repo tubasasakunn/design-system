@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>群れの知性</title>
+<meta name="pattern-title" content="群れの知性">
+<meta name="pattern-desc" content="分離・整列・結合で泳ぐ群れ。ポインタは捕食者として群れを裂き、近傍探索で滑らかに動く。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #stage { position: fixed; inset: 0; display: block; touch-action: none; cursor: none; }
+  #hint {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    padding: .5rem 1rem; border-radius: 999px;
+    font-size: .8rem; letter-spacing: .04em;
+    color: var(--color-fg-secondary);
+    background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(8px);
+    pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hint">ポインタは捕食者 / 群れが避けて割れる</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d");
+  const root = document.documentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(root).getPropertyValue(n).trim() || fb;
+  let COL = {};
+  function readColors() {
+    COL = {
+      bg:     token("--color-bg-primary", "#faf7f1"),
+      ink:    token("--color-fg-primary", "#2c2a26"),
+      soft:   token("--color-fg-secondary", "#6c655b"),
+      accent: token("--color-accent-default", "#5bbcb1"),
+      hover:  token("--color-accent-hover", "#46a89d"),
+      error:  token("--color-status-error", "#ef5b5b"),
+    };
+  }
+  readColors();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-appearance"] });
+
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    grid.build();
+  }
+
+  // 個体数は画面積に応じる（数十〜数百）
+  const boids = [];
+  const PERCEPT = 46;         // 近傍半径
+  const SEP = 22;             // 分離半径
+  const MAXV = 148, MINV = 62;
+  const MAXF = 220;
+
+  function boidCount() {
+    return reduce.matches ? 60 : Math.max(90, Math.min(360, Math.round(W * H / 6500)));
+  }
+
+  function initBoids() {
+    boids.length = 0;
+    const n = boidCount();
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = MINV + Math.random() * (MAXV - MINV);
+      boids.push({
+        x: Math.random() * W, y: Math.random() * H,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        tone: Math.random(),
+      });
+    }
+  }
+
+  // 空間ハッシュグリッドで近傍探索を O(n) に近づける
+  const grid = {
+    cell: PERCEPT,
+    cols: 0, rows: 0, buckets: [],
+    build() {
+      this.cell = PERCEPT;
+      this.cols = Math.max(1, Math.ceil(W / this.cell));
+      this.rows = Math.max(1, Math.ceil(H / this.cell));
+      this.buckets = new Array(this.cols * this.rows);
+    },
+    clear() {
+      for (let i = 0; i < this.buckets.length; i++) this.buckets[i] = undefined;
+    },
+    idx(cx, cy) { return cy * this.cols + cx; },
+    insert(b) {
+      let cx = (b.x / this.cell) | 0, cy = (b.y / this.cell) | 0;
+      if (cx < 0) cx = 0; else if (cx >= this.cols) cx = this.cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= this.rows) cy = this.rows - 1;
+      const k = this.idx(cx, cy);
+      (this.buckets[k] || (this.buckets[k] = [])).push(b);
+    },
+  };
+
+  let pointer = { x: -9999, y: -9999, active: false };
+  function pm(e) { pointer.x = e.clientX; pointer.y = e.clientY; pointer.active = true; }
+  canvas.addEventListener("pointermove", pm);
+  canvas.addEventListener("pointerdown", (e) => { canvas.setPointerCapture?.(e.pointerId); pm(e); });
+  canvas.addEventListener("pointerleave", () => { pointer.active = false; pointer.x = pointer.y = -9999; });
+
+  function limit(x, y, max) {
+    const m = Math.hypot(x, y);
+    if (m > max && m > 0) return [x / m * max, y / m * max];
+    return [x, y];
+  }
+
+  const FLEE = 130;
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+
+    grid.clear();
+    for (const b of boids) grid.insert(b);
+
+    const cell = grid.cell;
+    for (const b of boids) {
+      let cx = (b.x / cell) | 0, cy = (b.y / cell) | 0;
+      if (cx < 0) cx = 0; else if (cx >= grid.cols) cx = grid.cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= grid.rows) cy = grid.rows - 1;
+
+      let alignX = 0, alignY = 0, cohX = 0, cohY = 0, sepX = 0, sepY = 0, count = 0;
+      const P2 = PERCEPT * PERCEPT, S2 = SEP * SEP;
+
+      // 3x3 セルだけ走査
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        if (gy < 0 || gy >= grid.rows) continue;
+        for (let gx = cx - 1; gx <= cx + 1; gx++) {
+          if (gx < 0 || gx >= grid.cols) continue;
+          const bucket = grid.buckets[gy * grid.cols + gx];
+          if (!bucket) continue;
+          for (const o of bucket) {
+            if (o === b) continue;
+            const dx = o.x - b.x, dy = o.y - b.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 > P2 || d2 === 0) continue;
+            alignX += o.vx; alignY += o.vy;
+            cohX += o.x; cohY += o.y;
+            count++;
+            if (d2 < S2) {
+              const d = Math.sqrt(d2);
+              sepX -= dx / d; sepY -= dy / d;
+            }
+          }
+        }
+      }
+
+      let ax = 0, ay = 0;
+      if (count > 0) {
+        // 整列
+        alignX /= count; alignY /= count;
+        let [alx, aly] = limit(alignX, alignY, MAXV);
+        alx -= b.vx; aly -= b.vy;
+        [alx, aly] = limit(alx, aly, MAXF);
+        // 結合
+        cohX = cohX / count - b.x; cohY = cohY / count - b.y;
+        let [clx, cly] = limit(cohX, cohY, MAXV);
+        clx -= b.vx; cly -= b.vy;
+        [clx, cly] = limit(clx, cly, MAXF);
+        // 分離
+        let [slx, sly] = limit(sepX, sepY, MAXV);
+        if (sepX || sepY) { slx -= b.vx; sly -= b.vy; [slx, sly] = limit(slx, sly, MAXF); }
+
+        ax += alx * 1.0 + clx * 0.9 + slx * 1.7;
+        ay += aly * 1.0 + cly * 0.9 + sly * 1.7;
+      }
+
+      // 捕食者から逃げる
+      if (pointer.active) {
+        const dx = b.x - pointer.x, dy = b.y - pointer.y;
+        const d = Math.hypot(dx, dy);
+        if (d < FLEE && d > 0) {
+          const s = (1 - d / FLEE);
+          ax += (dx / d) * MAXF * 4 * s;
+          ay += (dy / d) * MAXF * 4 * s;
+        }
+      }
+
+      // やわらかく画面内へ戻す（境界回避）
+      const margin = 60, turn = MAXF * 1.2;
+      if (b.x < margin) ax += turn * (1 - b.x / margin);
+      else if (b.x > W - margin) ax -= turn * (1 - (W - b.x) / margin);
+      if (b.y < margin) ay += turn * (1 - b.y / margin);
+      else if (b.y > H - margin) ay -= turn * (1 - (H - b.y) / margin);
+
+      b.ax = ax; b.ay = ay;
+    }
+
+    // 積分
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const b of boids) {
+      b.vx += b.ax * dt;
+      b.vy += b.ay * dt;
+      let [vx, vy] = limit(b.vx, b.vy, MAXV);
+      // 最低速度を保って泳ぎ続ける
+      const sp = Math.hypot(vx, vy);
+      if (sp < MINV && sp > 0) { vx = vx / sp * MINV; vy = vy / sp * MINV; }
+      b.vx = vx; b.vy = vy;
+      b.x += vx * dt;
+      b.y += vy * dt;
+
+      // 三角形で向きを表現
+      const ang = Math.atan2(vy, vx);
+      const size = 5.2;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(ang);
+      ctx.fillStyle = b.tone > 0.72 ? COL.accent : (b.tone > 0.4 ? COL.soft : COL.ink);
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(size, 0);
+      ctx.lineTo(-size * 0.7, size * 0.6);
+      ctx.lineTo(-size * 0.7, -size * 0.6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    // 捕食者
+    if (pointer.active) {
+      ctx.strokeStyle = COL.error;
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, FLEE, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = COL.error;
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("resize", () => { resize(); initBoids(); });
+  resize();
+  initBoids();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

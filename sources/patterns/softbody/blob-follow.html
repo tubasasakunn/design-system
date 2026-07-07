@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="ついてくるブロブ">
+<meta name="pattern-desc" content="遅延ばねでカーソルを追う丸いブロブ。速度で進行方向へ伸び、止まるとぷるんと円へ戻る。目玉付き。">
+<title>ついてくるブロブ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    height: 100dvh;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: none; }
+  .caption {
+    position: fixed; left: 24px; bottom: 24px; max-width: 300px;
+    padding: 14px 18px; border-radius: 20px;
+    background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+    border: 1px solid var(--color-border-default);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  .caption h1 { font-size: .95rem; font-weight: 600; letter-spacing: .04em; }
+  .caption p { margin-top: 4px; font-size: .76rem; line-height: 1.6; color: var(--color-fg-muted); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="caption">
+  <h1>ついてくるブロブ</h1>
+  <p>カーソルを動かすと、ちょっと遅れて追いかけてきます。速いと伸び、止まるとぷるんと丸へ。</p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const rm = matchMedia("(prefers-reduced-motion: reduce)");
+
+  const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+  let C = {};
+  function readColors() {
+    C = {
+      bg:    token("--color-bg-primary", "#faf7f1"),
+      body:  token("--color-accent-default", "#5bbcb1"),
+      hi:    token("--color-bg-elevated", "#fffdf9"),
+      deep:  token("--color-accent-fg", "#07312d"),
+      ink:   token("--color-fg-primary", "#2c2a26"),
+      white: token("--color-bg-elevated", "#fffdf9"),
+    };
+  }
+  const mix = (a, b, t) => {
+    const p = (h) => { h = h.replace("#",""); if (h.length===3) h=h.split("").map(c=>c+c).join(""); const n=parseInt(h.slice(0,6),16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+    const A = p(a), B = p(b);
+    return `rgb(${Math.round(A[0]+(B[0]-A[0])*t)},${Math.round(A[1]+(B[1]-A[1])*t)},${Math.round(A[2]+(B[2]-A[2])*t)})`;
+  };
+
+  let W = 0, H = 0, R = 60;
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    R = Math.max(46, Math.min(W, H) * 0.09);
+  }
+
+  // 目標（カーソル）と、遅延ばねで追う体
+  const target = { x: innerWidth / 2, y: innerHeight / 2 };
+  const blob = { x: target.x, y: target.y, vx: 0, vy: 0 };
+  // 進行方向の伸びと、止まった瞬間の「ぷるん」ジグル（減衰振動）
+  let stretch = 1, stretchV = 0;
+  let jiggle = 0, jiggleV = 0;
+  let heading = 0;
+  let eye = { x: 0, y: 0 };     // 目玉の追従（少し遅れる）
+
+  addEventListener("pointermove", (e) => { target.x = e.clientX; target.y = e.clientY; }, { passive: true });
+  addEventListener("pointerdown", (e) => { target.x = e.clientX; target.y = e.clientY; jiggleV += 10; }, { passive: true });
+
+  const K = 90;      // 追従ばね
+  const DAMP = 11;   // 追従減衰
+
+  function update(dt) {
+    if (rm.matches) { blob.x = target.x; blob.y = target.y; }
+    // 遅延ばね（臨界に近い減衰）
+    const ax = (target.x - blob.x) * K - blob.vx * DAMP;
+    const ay = (target.y - blob.y) * K - blob.vy * DAMP;
+    blob.vx += ax * dt; blob.vy += ay * dt;
+    const nx = blob.x + blob.vx * dt, ny = blob.y + blob.vy * dt;
+    blob.x = nx; blob.y = ny;
+
+    const speed = Math.hypot(blob.vx, blob.vy);
+    if (speed > 6) heading = Math.atan2(blob.vy, blob.vx);
+
+    // 伸びの目標は速度に比例（体積保存で直交方向は縮む）
+    const targetStretch = rm.matches ? 1 : Math.min(1 + speed * 0.00042, 1.75);
+    // 伸びもばねで滑らかに
+    const sa = (targetStretch - stretch) * 120 - stretchV * 16;
+    stretchV += sa * dt; stretch += stretchV * dt;
+
+    // 加速度（速度変化）でジグルを励起 → 止まると「ぷるん」
+    const acc = Math.hypot(ax, ay);
+    if (!rm.matches) jiggleV += Math.min(acc * dt * 0.02, 4);
+    const ja = -jiggle * 340 - jiggleV * 12;   // 減衰振動
+    jiggleV += ja * dt; jiggle += jiggleV * dt;
+
+    // 目玉はさらに少し遅れて追従
+    eye.x += ((target.x - blob.x) * 0.02 - eye.x) * Math.min(dt * 8, 1);
+    eye.y += ((target.y - blob.y) * 0.02 - eye.y) * Math.min(dt * 8, 1);
+  }
+
+  // ブロブの輪郭: 円 + 高調波のゆらぎ（jiggle 由来）を、進行方向へアフィン変形
+  const LOBES = 5;
+  const phase = Array.from({ length: LOBES }, () => Math.random() * Math.PI * 2);
+  let tsec = 0;
+  function blobPath(cx, cy, r, st) {
+    const sq = 1 / Math.sqrt(st);   // 直交方向の縮み（面積保存）
+    const cos = Math.cos(heading), sin = Math.sin(heading);
+    const seg = 46;
+    ctx.beginPath();
+    for (let i = 0; i <= seg; i++) {
+      const a = (i / seg) * Math.PI * 2;
+      let rr = r;
+      // ぷるんのゆらぎ（複数ローブ、jiggle で増幅）
+      for (let k = 0; k < LOBES; k++) {
+        rr += Math.sin(a * (k + 2) + phase[k] + tsec * 1.6) * jiggle * r * 0.9 / (k + 1);
+      }
+      // ローカル楕円（進行方向 st、直交 sq）
+      let lx = Math.cos(a) * rr * st;
+      let ly = Math.sin(a) * rr * sq;
+      // 進行方向へ回転
+      const x = cx + lx * cos - ly * sin;
+      const y = cy + lx * sin + ly * cos;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    // 影
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(blob.x, blob.y + R * 0.9, R * 0.9, R * 0.28, 0, 0, Math.PI * 2);
+    ctx.fillStyle = mix(C.bg, C.ink, 0.09);
+    ctx.filter = "blur(6px)";
+    ctx.fill();
+    ctx.restore();
+
+    // 本体
+    blobPath(blob.x, blob.y, R, stretch);
+    const g = ctx.createRadialGradient(blob.x - R * 0.3, blob.y - R * 0.4, R * 0.1, blob.x, blob.y, R * 1.5);
+    g.addColorStop(0, mix(C.body, C.hi, 0.5));
+    g.addColorStop(0.65, C.body);
+    g.addColorStop(1, mix(C.body, C.deep, 0.3));
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = mix(C.body, C.deep, 0.4);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // つや
+    ctx.save();
+    blobPath(blob.x, blob.y, R, stretch);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.ellipse(blob.x - R * 0.3, blob.y - R * 0.42, R * 0.34, R * 0.2, -0.5, 0, Math.PI * 2);
+    ctx.fillStyle = mix(C.hi, C.body, 0.1);
+    ctx.globalAlpha = 0.55; ctx.fill();
+    ctx.restore();
+
+    // 目玉（カーソル方向を見る）
+    const look = Math.atan2(target.y - blob.y, target.x - blob.x);
+    const ex = R * 0.34, ey = -R * 0.12;
+    for (const s of [-1, 1]) {
+      const cx0 = blob.x + eye.x + Math.cos(heading) * 0 + s * ex * Math.cos(heading + Math.PI / 2);
+      const cy0 = blob.y + eye.y + s * ex * Math.sin(heading + Math.PI / 2) + ey;
+      const er = R * 0.2;
+      ctx.beginPath(); ctx.arc(cx0, cy0, er, 0, Math.PI * 2);
+      ctx.fillStyle = C.white; ctx.fill();
+      // 瞳
+      const pr = er * 0.5;
+      const px = cx0 + Math.cos(look) * er * 0.42;
+      const py = cy0 + Math.sin(look) * er * 0.42;
+      ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2);
+      ctx.fillStyle = C.deep; ctx.fill();
+      // ハイライト
+      ctx.beginPath(); ctx.arc(px - pr * 0.3, py - pr * 0.3, pr * 0.35, 0, Math.PI * 2);
+      ctx.fillStyle = C.white; ctx.fill();
+    }
+  }
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    tsec += dt;
+    acc += dt;
+    const STEP = 1 / 120; let n = 0;
+    while (acc >= STEP && n < 6) { update(STEP); acc -= STEP; n++; }
+    if (acc >= STEP) acc = 0;
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  new MutationObserver(readColors).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+  });
+  addEventListener("resize", resize);
+  readColors();
+  resize();
+  requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>

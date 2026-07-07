@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>タイプの詩</title>
+<meta name="pattern-title" content="タイプの詩">
+<meta name="pattern-desc" content="詩が打鍵の間を揺らしながら刻まれ、打ち間違いは削って書き直す。カーソルは静かに明滅する。">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--color-bg-primary);
+    color: var(--color-fg-primary);
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+    display: grid; place-items: center;
+  }
+  #sheet {
+    width: min(86vw, 640px);
+    padding: clamp(28px, 6vw, 64px);
+    border-radius: 22px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    box-shadow: 0 18px 50px -28px color-mix(in srgb, var(--color-fg-primary) 55%, transparent);
+  }
+  #poem {
+    white-space: pre-wrap;
+    font-size: clamp(19px, 3.4vw, 30px);
+    line-height: 2.05;
+    letter-spacing: .04em;
+    color: var(--color-fg-primary);
+    min-height: 1.4em;
+  }
+  #poem .ghost { color: var(--color-status-error); opacity: .7; }
+  #cursor {
+    display: inline-block;
+    width: .62em; height: 1.15em;
+    margin-left: .02em;
+    transform: translateY(.18em);
+    background: var(--color-accent-default);
+    border-radius: 2px;
+    opacity: 1;
+  }
+  #cursor.blink { animation: blink 1.06s steps(1) infinite; }
+  @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+  #by {
+    margin-top: 1.8em; font-size: .8rem; letter-spacing: .12em;
+    color: var(--color-fg-muted); text-align: right;
+    opacity: 0; transition: opacity 1.2s ease;
+  }
+</style>
+</head>
+<body>
+<div id="sheet">
+  <div id="poem"><span id="text"></span><span id="cursor"></span></div>
+  <div id="by">― 窓辺にて</div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const textEl = document.getElementById("text");
+  const cursor = document.getElementById("cursor");
+  const byEl = document.getElementById("by");
+
+  const lines = [
+    "雨のにおいがして",
+    "窓をすこし開ける",
+    "遠くで電車の音",
+    "ページをめくる指に",
+    "春がふれていく",
+  ];
+  const poem = lines.join("\n");
+
+  const kana = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもらりるれろ";
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  let buf = "";           // 確定文字
+  let ghost = "";         // 打ち間違い中の仮文字（赤）
+  function render() {
+    textEl.textContent = buf;
+    if (ghost) {
+      const g = document.createElement("span");
+      g.className = "ghost";
+      g.textContent = ghost;
+      textEl.appendChild(g);
+    }
+  }
+  const setBlink = (on) => cursor.classList.toggle("blink", on);
+
+  if (reduce.matches) {
+    buf = poem; render(); setBlink(true); byEl.style.opacity = ".9";
+    return;
+  }
+
+  // 打鍵の間: 文字ごとに揺らぎ、句や行末では長めに「息継ぎ」する
+  function keyDelay(ch, prev) {
+    let d = 70 + Math.random() * 110;
+    if (prev === "\n") d += 240;
+    if ("、。".includes(prev)) d += 300;
+    if (Math.random() < 0.06) d += 260 + Math.random() * 420; // ふとした逡巡
+    return d;
+  }
+
+  async function run() {
+    for (let i = 0; i < poem.length; i++) {
+      const ch = poem[i];
+      const prev = i > 0 ? poem[i - 1] : "\n";
+
+      if (ch === "\n") {
+        setBlink(true); await sleep(360 + Math.random() * 300); setBlink(false);
+        buf += "\n"; render();
+        continue;
+      }
+
+      // ときどき打ち間違える → 気づいて消す → 打ち直す
+      if (Math.random() < 0.14 && /[ぁ-ん]/.test(ch)) {
+        const n = 1 + ((Math.random() * 2) | 0);
+        for (let k = 0; k < n; k++) {
+          let wrong = kana[(Math.random() * kana.length) | 0];
+          if (wrong === ch) wrong = kana[(Math.random() * kana.length) | 0];
+          ghost += wrong; render();
+          await sleep(80 + Math.random() * 90);
+        }
+        setBlink(true); await sleep(220 + Math.random() * 260); setBlink(false); // あれ、と気づく間
+        while (ghost) {
+          ghost = ghost.slice(0, -1); render();
+          await sleep(55 + Math.random() * 70); // バックスペース
+        }
+        await sleep(90 + Math.random() * 120);
+      }
+
+      buf += ch; render();
+      setBlink(false);
+      await sleep(keyDelay(ch, prev));
+    }
+    setBlink(true);
+    byEl.style.opacity = ".9";
+  }
+
+  setBlink(true);
+  setTimeout(run, 700);
+})();
+</script>
+</body>
+</html>

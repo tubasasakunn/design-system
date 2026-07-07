@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pattern-title" content="波打つ液体ゲージ">
+<meta name="pattern-desc" content="円形ゲージの液面が位相差のある二層のサイン波で揺れ、値の変化にばねで追従する。">
+<title>波打つ液体ゲージ</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    height: 100dvh; overflow: hidden; font-family: system-ui, sans-serif;
+    background: var(--color-bg-primary); color: var(--color-fg-primary);
+    display: flex; align-items: center; justify-content: center;
+  }
+  main { display: flex; flex-direction: column; align-items: center; gap: 30px; padding: 16px; }
+  #gauge { width: min(58vh, 78vw); aspect-ratio: 1; display: block; touch-action: none; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .controls button {
+    font: inherit; font-size: .85rem; letter-spacing: .04em; cursor: pointer;
+    padding: .55rem 1.2rem; border-radius: 999px;
+    color: var(--color-fg-secondary); background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-default);
+    transition: transform .18s cubic-bezier(.34,1.56,.64,1), border-color .18s, color .18s;
+  }
+  .controls button:hover { border-color: var(--color-accent-default); color: var(--color-accent-hover); transform: translateY(-2px); }
+  .controls button:active { transform: translateY(0) scale(.96); }
+  .controls button[aria-pressed="true"] { border-color: var(--color-accent-default); color: var(--color-accent-hover); }
+  .hint { font-size: .75rem; letter-spacing: .06em; color: var(--color-fg-muted); }
+  @media (prefers-reduced-motion: reduce) { .controls button { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="gauge"></canvas>
+  <div class="controls" id="controls">
+    <button type="button" data-v="0.15">15%</button>
+    <button type="button" data-v="0.4">40%</button>
+    <button type="button" data-v="0.62" aria-pressed="true">62%</button>
+    <button type="button" data-v="0.9">90%</button>
+    <button type="button" id="rnd">ランダム</button>
+  </div>
+  <p class="hint">満ちるほど波は穏やかに ─ 値の移り変わりはばねで揺れる</p>
+</main>
+<script>
+(() => {
+"use strict";
+const canvas = document.getElementById("gauge");
+const ctx = canvas.getContext("2d");
+
+// ---- テーマトークン ----
+const token = (n, fb) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fb;
+const hexRgb = (h) => {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+  const n = parseInt(h.slice(0, 6), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const mix = (a, b, t) => [
+  Math.round(a[0] + (b[0] - a[0]) * t),
+  Math.round(a[1] + (b[1] - a[1]) * t),
+  Math.round(a[2] + (b[2] - a[2]) * t),
+];
+const C = {};
+const refreshColors = () => {
+  C.bg     = hexRgb(token("--color-bg-primary", "#faf7f1"));
+  C.inner  = hexRgb(token("--color-bg-elevated", "#fffdf9"));
+  C.ink    = hexRgb(token("--color-fg-primary", "#2c2a26"));
+  C.sub    = hexRgb(token("--color-fg-muted", "#a79f91"));
+  C.acc    = hexRgb(token("--color-accent-default", "#5bbcb1"));
+  C.accD   = hexRgb(token("--color-accent-hover", "#46a89d"));
+  C.border = hexRgb(token("--color-border-default", "#ece6db"));
+};
+refreshColors();
+new MutationObserver(refreshColors).observe(document.documentElement, {
+  attributes: true, attributeFilter: ["data-theme", "data-appearance"],
+});
+
+// ---- キャンバス ----
+let S = 0; // css px の一辺
+const resize = () => {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  S = canvas.clientWidth || 320;
+  canvas.width = Math.round(S * dpr); canvas.height = Math.round(S * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+};
+window.addEventListener("resize", resize);
+resize();
+
+const rmq = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reduced = rmq.matches;
+rmq.addEventListener?.("change", (e) => { reduced = e.matches; });
+
+// ---- ばね補間（減衰振動：ぽよんと目標へ）----
+let value = 0.62, target = 0.62, vel = 0;
+const OMEGA = 6.4, ZETA = 0.42;
+function springStep(dt) {
+  if (reduced) { value = target; vel = 0; return; }
+  const acc = -OMEGA * OMEGA * (value - target) - 2 * ZETA * OMEGA * vel;
+  vel += acc * dt;
+  value += vel * dt;
+}
+
+// ---- 操作 ----
+const controls = document.getElementById("controls");
+const setTarget = (v, btn) => {
+  target = Math.min(1, Math.max(0, v));
+  for (const b of controls.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === btn));
+};
+controls.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  if (btn.id === "rnd") setTarget(0.08 + Math.random() * 0.87, btn);
+  else setTarget(parseFloat(btn.dataset.v), btn);
+});
+
+// ---- 波形パス（二層のサイン波・位相差つき）----
+// layer: {phase, speed, ampMul, lift}
+function wavePath(cx, cy, R, levelY, amp, t, L) {
+  ctx.beginPath();
+  ctx.moveTo(cx - R - 2, cy + R + 2);
+  const k1 = (Math.PI * 2) / (R * 1.15);
+  const k2 = (Math.PI * 2) / (R * 0.52);
+  for (let x = -R - 2; x <= R + 2; x += 3) {
+    const y = levelY - L.lift
+      + Math.sin(x * k1 + t * 2.3 * L.speed + L.phase) * amp * L.ampMul
+      + Math.sin(x * k2 - t * 3.6 * L.speed + L.phase * 1.7) * amp * 0.45 * L.ampMul;
+    ctx.lineTo(cx + x, y);
+  }
+  ctx.lineTo(cx + R + 2, cy + R + 2);
+  ctx.closePath();
+}
+
+// ---- 描画 ----
+let last = performance.now(), t = 0;
+function frame(now) {
+  const dt = Math.min(0.04, (now - last) / 1000);
+  last = now;
+  if (!reduced) t += dt;
+  springStep(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function draw() {
+  const cx = S / 2, cy = S / 2;
+  const R = S * 0.42;
+  ctx.clearRect(0, 0, S, S);
+
+  const f = Math.min(1, Math.max(0, value));
+  const levelY = cy + R - 2 * R * f;
+  // 満たされ具合で穏やかに ＋ ばねの勢いでスロッシュ
+  const calm = 0.28 + 0.72 * (1 - f);
+  let amp = R * (0.045 * calm) + Math.min(R * 0.11, Math.abs(vel) * R * 0.5);
+  if (reduced) amp = R * 0.018 * calm;
+
+  // 器
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.fillStyle = rgba(C.inner, 1); ctx.fill();
+
+  // 液体（円でクリップ）
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, R - 1, 0, Math.PI * 2); ctx.clip();
+
+  // 奥の波（位相をずらし、薄く）
+  wavePath(cx, cy, R, levelY, amp, t, { phase: 2.1, speed: 0.8, ampMul: 1.35, lift: amp * 0.5 });
+  ctx.fillStyle = rgba(C.acc, 0.32);
+  ctx.fill();
+
+  // 手前の波（本体・深さのグラデーション）
+  wavePath(cx, cy, R, levelY, amp, t, { phase: 0, speed: 1, ampMul: 1, lift: 0 });
+  const g = ctx.createLinearGradient(0, levelY - amp, 0, cy + R);
+  g.addColorStop(0, rgba(C.acc, 0.94));
+  g.addColorStop(1, rgba(C.accD, 0.94));
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  // 数字：地の色で描き、液面下だけ明るい色に差し替える
+  const pct = Math.round(f * 100);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `600 ${Math.round(R * 0.46)}px system-ui, sans-serif`;
+  ctx.fillStyle = rgba(C.ink, 0.85);
+  ctx.fillText(`${pct}`, cx, cy - R * 0.02);
+  ctx.font = `500 ${Math.round(R * 0.12)}px system-ui, sans-serif`;
+  ctx.fillStyle = rgba(C.sub, 1);
+  ctx.fillText("PERCENT", cx, cy + R * 0.3);
+
+  ctx.save();
+  wavePath(cx, cy, R, levelY, amp, t, { phase: 0, speed: 1, ampMul: 1, lift: 0 });
+  ctx.clip();
+  ctx.font = `600 ${Math.round(R * 0.46)}px system-ui, sans-serif`;
+  ctx.fillStyle = rgba(C.inner, 0.96);
+  ctx.fillText(`${pct}`, cx, cy - R * 0.02);
+  ctx.font = `500 ${Math.round(R * 0.12)}px system-ui, sans-serif`;
+  ctx.fillStyle = rgba(mix(C.inner, C.acc, 0.2), 0.9);
+  ctx.fillText("PERCENT", cx, cy + R * 0.3);
+  ctx.restore();
+
+  ctx.restore(); // 円クリップ解除
+
+  // 縁取りと目標値の弧
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.strokeStyle = rgba(C.border, 1); ctx.lineWidth = 1.5; ctx.stroke();
+
+  const rr = R + S * 0.035;
+  ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+  ctx.strokeStyle = rgba(C.border, 0.7); ctx.lineWidth = 2; ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, rr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * target);
+  ctx.strokeStyle = rgba(C.acc, 0.9); ctx.lineWidth = 3.5; ctx.lineCap = "round"; ctx.stroke();
+}
+
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
