@@ -109,6 +109,68 @@ export function loadIcons(root) {
   return icons.sort((a, b) => a.style.localeCompare(b.style) || a.name.localeCompare(b.name));
 }
 
+// sources/patterns/<category>/<name>.html を集める。
+// 第1階層 = category（water / motion-3d / scroll …）、ファイル名 = パターン名。
+export function loadPatterns(root) {
+  const patterns = [];
+  for (const category of subdirs(root)) {
+    const dir = join(root, category);
+    for (const file of readdirSync(dir)) {
+      if (!file.endsWith(".html")) continue;
+      patterns.push({ category, name: file.replace(/\.html$/, ""), path: join(dir, file) });
+    }
+  }
+  return patterns.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
+}
+
+// パターン HTML から <meta name="pattern-title/desc"> を抽出する。title 側は <title> にフォールバック。
+export function patternMeta(html) {
+  const meta = (n) => {
+    const m =
+      html.match(new RegExp(`<meta[^>]*name=["']pattern-${n}["'][^>]*content=["']([^"']*)["']`, "i")) ||
+      html.match(new RegExp(`<meta[^>]*content=["']([^"']*)["'][^>]*name=["']pattern-${n}["']`, "i"));
+    return m?.[1];
+  };
+  return {
+    title: meta("title") ?? html.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim() ?? "",
+    desc: meta("desc") ?? "",
+  };
+}
+
+// パターン原本 HTML に、テーマ CSS 変数・テーマ同期スクリプト・戻る/外観トグルの
+// 小さなオーバーレイを注入して配布形にする。build-preview と検証スクリプトで共用。
+export function injectPatternChrome(html, themeCss, defaultTheme, { backHref = "../index.html" } = {}) {
+  const head = `
+<style id="ds-theme">${themeCss}</style>
+<script id="ds-theme-sync">(() => { try {
+  const q = new URLSearchParams(location.search);
+  let ls = null; try { ls = window.localStorage; } catch {}
+  const root = document.documentElement;
+  root.dataset.theme = q.get("theme") || ls?.getItem("ds-theme") || root.dataset.theme || ${JSON.stringify(defaultTheme ?? "")} || "light";
+  root.dataset.appearance = q.get("appearance") || ls?.getItem("ds-appearance") || root.dataset.appearance || "light";
+} catch {} })()</script>`;
+  const chrome = `
+<div id="ds-chrome" style="position:fixed;inset:auto 0 0 0;top:0;height:0;z-index:2147483000;pointer-events:none;font-family:system-ui,sans-serif;">
+  <a href="${backHref}" style="pointer-events:auto;position:fixed;top:14px;left:14px;display:inline-block;padding:.45rem .85rem;border-radius:999px;font-size:.8rem;text-decoration:none;color:var(--color-fg-secondary);background:color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);border:1px solid var(--color-border-default);backdrop-filter:blur(8px);box-shadow:0 2px 6px rgba(40,35,25,.08);">← 一覧</a>
+  <button id="ds-appearance-toggle" type="button" style="pointer-events:auto;position:fixed;top:14px;right:14px;padding:.45rem .85rem;border-radius:999px;font:inherit;font-size:.8rem;cursor:pointer;color:var(--color-fg-secondary);background:color-mix(in srgb, var(--color-bg-elevated) 82%, transparent);border:1px solid var(--color-border-default);backdrop-filter:blur(8px);box-shadow:0 2px 6px rgba(40,35,25,.08);"></button>
+</div>
+<script>(() => { try {
+  const root = document.documentElement;
+  const btn = document.getElementById("ds-appearance-toggle");
+  const label = () => { btn.textContent = root.dataset.appearance === "dark" ? "☾ dark" : "☀ light"; };
+  btn.addEventListener("click", () => {
+    root.dataset.appearance = root.dataset.appearance === "dark" ? "light" : "dark";
+    try { localStorage.setItem("ds-appearance", root.dataset.appearance); } catch {}
+    label();
+  });
+  label();
+} catch {} })()</script>`;
+  let out = html;
+  out = /<head[^>]*>/i.test(out) ? out.replace(/<head[^>]*>/i, (m) => m + head) : head + out;
+  out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, chrome + "\n</body>") : out + chrome;
+  return out;
+}
+
 // 利用可能なアイコンスタイル一覧（ソート済み）。
 export function iconStyles(root) {
   return subdirs(root).sort();

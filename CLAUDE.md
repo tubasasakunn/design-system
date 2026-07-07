@@ -34,6 +34,7 @@ sources/                 ← 唯一の正。編集するのはここだけ
   icons/<style>/<category>/<name>.svg   生 SVG。第1階層=style(丸み/カクカク…)、第2階層=category
   themes/<theme>/light.json
   themes/<theme>/dark.json        テーマ毎フォルダ。外観(appearance)別ファイル
+  patterns/<category>/<name>.html 表現パターン(自己完結のビジュアル表現デモ)。第1階層=category
 build/                   ← 変換スクリプト(依存ゼロの .mjs)
   lib.mjs                  共通ユーティリティ(flatten / parseHex / loaders / findDefaultTheme)
   build-web.mjs           Web 向け生成
@@ -42,7 +43,7 @@ build/                   ← 変換スクリプト(依存ゼロの .mjs)
 dist/                    ← 生成物。手で編集しない。.gitignore 対象（コミットしない）
   web/      themes.css, themes.ts, icons/<style>/<category>/, icons.ts
   swift/    Colors/<Theme>.xcassets, Icons.xcassets(style で名前空間化), DesignSystem.swift
-  preview/  index.html（自己完結カタログ）
+  preview/  index.html（自己完結カタログ）, patterns/（表現パターン集: index.html + 各ページ）
 DESIGN.md                ← デザイン思想・審美眼（何を好みとするか）
 .github/workflows/pages.yml  ← main への push で build → GitHub Pages へ公開
 ```
@@ -67,6 +68,19 @@ DESIGN.md                ← デザイン思想・審美眼（何を好みとす
 - トークンは**用途ベースのセマンティック名**で揃える。現行の階層: `color.bg.*`, `color.fg.*`, `color.accent.*`, `color.border.*`, `color.status.*`。
   - 新トークンを足すときは **全テーマ・全外観に同じキーを追加する**（欠けると Web で変数未定義、Swift で colorset 不足になる）。
 - **`:root` 既定値にするテーマは、その `light.json`（または任意の外観 JSON）に `"$default": true` を入れて指定する**（`build/lib.mjs` の `findDefaultTheme`）。特定テーマ名のハードコードはしない。`$default` を持つテーマが無ければ、どのテーマも `:root` を持たない（全テーマが属性スコープのみ）。
+
+### 表現パターン (`sources/patterns/`)
+
+Web の高度なビジュアル表現（水面・3D・スクロール演出・ソフトボディ・パーティクル・光・ジェネラティブ・インタラクション・トランジション・タイポグラフィ）のデモを、アイコン/テーマと同じく「好みで選ぶ」ために一元管理するレイヤー。
+
+- **1 パターン = 1 つの自己完結 HTML**: `sources/patterns/<category>/<name>.html`。第1階層 = **category**、ファイル名 = パターン名（`kebab-case`）。
+- 完全な HTML 文書（`<html lang="ja">` + charset + viewport + `<title>`）。**外部リソース（CDN・Web フォント・画像・fetch）禁止**、vanilla JS のみ。
+- 必須メタ: `<meta name="pattern-title" content="日本語タイトル">` と `<meta name="pattern-desc" content="一文説明">`（ギャラリーのカードに使われる）。
+- **テーマ CSS（`--color-*` の定義）は書かず、参照だけする**（`var(--color-bg-primary)` 等）。ビルド（`build-preview.mjs` → `lib.mjs` の `injectPatternChrome`）がテーマ変数・テーマ同期スクリプト・「← 一覧」/外観トグルのオーバーレイを注入する。
+- テーマ/外観は `<html>` の `data-theme` / `data-appearance` で切り替わる。canvas 等で JS から色を使う場合は `getComputedStyle` で取得し、**MutationObserver で属性変化を監視して再取得**する。
+- canvas は devicePixelRatio（上限 2）・resize 対応、`requestAnimationFrame` + デルタ時間。`prefers-reduced-motion: reduce` では常時アニメーションを止める。マウス・タッチ両対応。`scroll` カテゴリ以外はページをスクロールさせない。
+- 見た目は `DESIGN.md` のハウススタイル（静かなミニマル・パステル・丸角・生成り）に従う。
+- 生成先は `dist/preview/patterns/`（各ページ + ギャラリー `index.html`）。カタログ（`dist/preview/index.html`）のヘッダからリンクされる。Pages にもそのまま公開される。
 
 ## 生成物の使い方（消費側）
 
